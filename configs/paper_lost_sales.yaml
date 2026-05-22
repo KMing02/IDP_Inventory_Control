@@ -1,0 +1,58 @@
+# Maggiar et al. (2025) lost-sales replication configuration.
+# TODO: Verify all product-economics sampling ranges against the paper appendix/code if available.
+
+history_length_H: 32
+training_horizon_T: 100
+evaluation_horizon: 520
+burn_in: 20
+training_products: 40000
+test_products: 100000
+batch_size: 2500
+epochs: 1000
+optimizer: Adam
+learning_rate: 0.001
+
+fcnn:
+  hidden_layers: 2
+  hidden_units: 32
+  activation: ELU
+  imitation_epochs: 20
+  validation_interval: 10
+  use_full_history: true
+  max_order_factor: 2.0
+
+demand_distribution: Gamma
+
+product_features:
+  - price
+  - purchase_cost
+  - holding_cost
+  - lost_sale_penalty
+  - mean_demand
+  - coefficient_of_variation
+
+# TODO: Replace these synthetic ranges with exact paper ranges when verified.
+product_generation:
+  seed: 2025
+  price_range: [8.0, 20.0]
+  purchase_cost_fraction_range: [0.35, 0.75]
+  holding_cost_fraction_range: [0.01, 0.08]
+  lost_sale_penalty_fraction_range: [0.1, 0.8]
+  mean_demand_range: [4.0, 40.0]
+  coefficient_of_variation_range: [0.2, 1.2]
+  initial_inventory_multiplier_range: [0.0, 2.0]
+
+tuning:
+  min_stock_level: 0
+  max_stock_level: 120
+  oracle_mc_samples: 200000
+
+# Development caps keep scripts runnable locally. Full replication should set
+# these to null or remove them.
+# TODO: Disable caps for final large-scale paper replication runs.
+runtime:
+  max_training_products: 256
+  max_test_products: 512
+  baseline_eval_products: 200
+  fcnn_train_products: 512
+  fcnn_test_products: 200

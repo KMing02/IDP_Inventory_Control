@@ -1,0 +1,27 @@
+horizon: 50
+n_episodes: 200
+seed: 123
+
+environment:
+  initial_inventory: 10
+  holding_cost: 1.0
+  lost_sales_cost: 5.0
+  unit_order_cost: 1.0
+  fixed_order_cost: 0.0
+
+demand:
+  type: poisson
+  lam: 8.0
+
+policies:
+  base_stock:
+    S: 12
+  constant_order:
+    quantity: 8
+  random:
+    max_order: 16
+
+tuning:
+  base_stock:
+    min_stock_level: 0
+    max_stock_level: 30

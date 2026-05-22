@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inventory-control"
+version = "0.1.0"
+description = "Research codebase for neural inventory control baselines."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "torch"]
+neural = ["torch"]
+
+[tool.setuptools.packages.find]
+include = ["inventory_control*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,0 +1,54 @@
+# Tiny Maggiar-style lost-sales config for local smoke tests.
+# This is intentionally small and is not a scientific experiment setting.
+
+history_length_H: 8
+training_horizon_T: 8
+evaluation_horizon: 12
+burn_in: 2
+training_products: 8
+test_products: 6
+batch_size: 4
+epochs: 2
+optimizer: Adam
+learning_rate: 0.001
+
+fcnn:
+  hidden_layers: 1
+  hidden_units: 8
+  activation: ELU
+  imitation_epochs: 1
+  validation_interval: 1
+  use_full_history: true
+  max_order_factor: 2.0
+
+demand_distribution: Gamma
+
+product_features:
+  - price
+  - purchase_cost
+  - holding_cost
+  - lost_sale_penalty
+  - mean_demand
+  - coefficient_of_variation
+
+product_generation:
+  seed: 2025
+  price_range: [8.0, 20.0]
+  purchase_cost_fraction_range: [0.35, 0.75]
+  holding_cost_fraction_range: [0.01, 0.08]
+  lost_sale_penalty_fraction_range: [0.1, 0.8]
+  mean_demand_range: [4.0, 20.0]
+  coefficient_of_variation_range: [0.2, 1.0]
+  initial_inventory_multiplier_range: [0.0, 2.0]
+
+tuning:
+  min_stock_level: 0
+  max_stock_level: 60
+  oracle_mc_samples: 2000
+
+runtime:
+  max_training_products: 8
+  max_test_products: 6
+  baseline_eval_products: 6
+  fcnn_train_products: 8
+  fcnn_test_products: 6
