@@ -81,7 +81,10 @@ def evaluate_paper_lost_sales_policy(
     for _ in range(n_episodes):
         inventory = float(product.initial_inventory)
         episode_reward = 0.0
-        demands = product.sample_demand(rng, size=horizon + burn_in)
+        if product.future_demand is not None and len(product.future_demand) >= horizon + burn_in:
+            demands = np.asarray(product.future_demand[: horizon + burn_in], dtype=float)
+        else:
+            demands = product.sample_demand(rng, size=horizon + burn_in)
         for t, demand in enumerate(demands):
             order = policy.act(inventory, t, rng=rng)
             inventory, reward, info = paper_lost_sales_step(

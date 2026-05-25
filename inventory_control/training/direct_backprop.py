@@ -54,12 +54,21 @@ def make_paper_lost_sales_training_batch(
         price_scale = feature_stats.price_scale
     for product in products:
         history = torch.tensor(product.historical_demand, dtype=torch.float32)
-        indices = torch.randint(0, len(product.historical_demand), (horizon,), generator=generator)
-        demand_paths.append(history[indices])
+        if product.future_demand is not None and len(product.future_demand) >= horizon:
+            demand_paths.append(torch.tensor(product.future_demand[:horizon], dtype=torch.float32))
+        else:
+            indices = torch.randint(0, len(product.historical_demand), (horizon,), generator=generator)
+            demand_paths.append(history[indices])
         scale = torch.tensor(demand_scale, dtype=torch.float32) if feature_stats is not None else torch.clamp(history.mean(), min=1.0)
         histories.append(history / scale)
     return {
-        "initial_inventory": torch.tensor([p.initial_inventory for p in products], dtype=torch.float32),
+        "initial_inventory": torch.tensor(
+            [
+                float(torch.rand((), generator=generator).item()) * 2.0 * max(float(p.historical_demand[-1]), 1.0)
+                for p in products
+            ],
+            dtype=torch.float32,
+        ),
         "history": torch.stack(histories, dim=0),
         "feature_demand_scale": torch.full((len(products),), float(demand_scale), dtype=torch.float32)
         if feature_stats is not None

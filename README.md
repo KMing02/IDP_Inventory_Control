@@ -19,7 +19,7 @@ Current status:
 
 Current limitations:
 
-- Exact paper product-generation ranges still need verification against the reference implementation or appendix.
+- Paper lost-sales product generation follows Table 1 of Maggiar et al. for the synthetic LS setting, but the policy architecture is still a simplified FCNN rather than the paper's causal-CNN history encoder plus MLP.
 - `OracleGammaBaseStock` is an oracle critical-quantile base-stock benchmark, not a globally optimal dynamic policy.
 - Differentiable training currently exists for the FCNN path only.
 - MonoMLP, MonoKAN, multi-echelon, perishability, and procurement-removal settings are not implemented yet.
@@ -170,7 +170,20 @@ The main replication config is:
 configs/paper_lost_sales.yaml
 ```
 
-It defines the lost-sales history length, training/evaluation horizons, FCNN architecture, Gamma-demand product generation, and local runtime caps. Some product-generation ranges are marked with TODOs until exact paper appendix/code parameters are verified.
+It defines the lost-sales history length, training/evaluation horizons, FCNN architecture, Gamma-demand product generation, and local runtime caps.
+
+The main paper config uses the synthetic product distribution from Table 1 of Maggiar et al.:
+
+```text
+price p                 ~ Exponential(mean=100)
+purchase cost c         = p * U, U ~ Uniform(0, 1)
+holding cost h          ~ Exponential(mean=5)
+lost-sale penalty k     = 10 * U, U ~ Uniform(0, 1)
+mean demand mu          ~ Exponential(mean=100)
+demand CV nu            ~ Uniform(0, 1)
+```
+
+The sampled `mu` and `nu` define hidden Gamma demand parameters. For each product, the generator samples one full demand trace. The first `H` values are stored as observable historical demand, and the future values are used by training/evaluation rollouts. Policies do not receive the hidden Gamma parameters or future demand trace.
 
 Run paper-style no-lead-time LS baselines:
 

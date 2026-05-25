@@ -48,6 +48,20 @@ def test_paper_rollout_returns_reward_not_negative_reward() -> None:
     assert rewards.shape == (2,)
 
 
+def test_training_batch_uses_stored_future_demand_trace() -> None:
+    product = PaperLostSalesProductGenerator(_paper_config()).generate(1, "train")[0]
+    product = product.__class__(
+        **{
+            **product.__dict__,
+            "future_demand": [3, 4, 5, 6],
+        }
+    )
+
+    batch = make_paper_lost_sales_training_batch([product], horizon=3, generator=torch.Generator().manual_seed(0))
+
+    assert batch["demand_paths"].tolist() == [[3.0, 4.0, 5.0]]
+
+
 def test_fcnn_adapter_state_dependent_cap_stops_orders_at_high_inventory() -> None:
     product = PaperLostSalesProductGenerator(_paper_config()).generate(1, "test")[0]
     model = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")

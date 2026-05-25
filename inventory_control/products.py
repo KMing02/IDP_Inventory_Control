@@ -86,6 +86,7 @@ class PaperLostSalesProduct:
     demand_distribution_type: str
     historical_demand: list[int]
     initial_inventory: int
+    future_demand: list[int] | None = None
 
     def observable_features(self) -> dict[str, Any]:
         """Return policy-observable features without true distribution parameters."""
@@ -125,19 +126,36 @@ class PaperLostSalesProductGenerator:
         index: int,
     ) -> PaperLostSalesProduct:
         generation = self.config["product_generation"]
-        price = _uniform_range(rng, generation["price_range"])
-        purchase_cost = price * _uniform_range(rng, generation["purchase_cost_fraction_range"])
-        holding_cost = price * _uniform_range(rng, generation["holding_cost_fraction_range"])
-        lost_sale_penalty = price * _uniform_range(rng, generation["lost_sale_penalty_fraction_range"])
-        mean_demand = _uniform_range(rng, generation["mean_demand_range"])
-        cv = _uniform_range(rng, generation["coefficient_of_variation_range"])
-        gamma_shape = 1.0 / max(cv**2, 1e-8)
+        if generation.get("mode") == "paper_table_1":
+            price = float(rng.exponential(float(generation.get("price_mean", 100.0))))
+            purchase_cost = price * float(rng.uniform(0.0, 1.0))
+            holding_cost = float(rng.exponential(float(generation.get("holding_cost_mean", 5.0))))
+            lost_sale_penalty = float(generation.get("lost_sale_penalty_max", 10.0)) * float(rng.uniform(0.0, 1.0))
+            mean_demand = float(rng.exponential(float(generation.get("mean_demand_mean", 100.0))))
+            cv_bounds = generation.get("coefficient_of_variation_range", [0.0, 1.0])
+            cv = _uniform_range(rng, cv_bounds)
+            initial_inventory = 0
+        else:
+            price = _uniform_range(rng, generation["price_range"])
+            purchase_cost = price * _uniform_range(rng, generation["purchase_cost_fraction_range"])
+            holding_cost = price * _uniform_range(rng, generation["holding_cost_fraction_range"])
+            lost_sale_penalty = price * _uniform_range(rng, generation["lost_sale_penalty_fraction_range"])
+            mean_demand = _uniform_range(rng, generation["mean_demand_range"])
+            cv = _uniform_range(rng, generation["coefficient_of_variation_range"])
+            initial_inventory = int(round(mean_demand * _uniform_range(rng, generation["initial_inventory_multiplier_range"])))
+        gamma_shape = 1.0 / max(cv**2, 1e-6)
         gamma_scale = mean_demand / gamma_shape
-        initial_inventory = int(round(mean_demand * _uniform_range(rng, generation["initial_inventory_multiplier_range"])))
-        history = np.maximum(
-            np.rint(rng.gamma(shape=gamma_shape, scale=gamma_scale, size=self.history_length)),
+        trace_horizon = max(
+            int(self.config.get("training_horizon_T", 0)),
+            int(self.config.get("evaluation_horizon", 0)) + int(self.config.get("burn_in", 0)),
+            1,
+        )
+        demand_trace = np.maximum(
+            np.rint(rng.gamma(shape=gamma_shape, scale=gamma_scale, size=self.history_length + trace_horizon)),
             0,
         ).astype(int)
+        history = demand_trace[: self.history_length]
+        future = demand_trace[self.history_length :]
         return PaperLostSalesProduct(
             product_id=f"{split}_{index:06d}",
             price=price,
@@ -151,6 +169,7 @@ class PaperLostSalesProductGenerator:
             demand_distribution_type="Gamma",
             historical_demand=history.tolist(),
             initial_inventory=initial_inventory,
+            future_demand=future.tolist(),
         )
 
 

@@ -33,13 +33,12 @@ product_features:
 
 product_generation:
   seed: 2025
-  price_range: [8.0, 20.0]
-  purchase_cost_fraction_range: [0.35, 0.75]
-  holding_cost_fraction_range: [0.01, 0.08]
-  lost_sale_penalty_fraction_range: [0.1, 0.8]
-  mean_demand_range: [4.0, 20.0]
-  coefficient_of_variation_range: [0.2, 1.0]
-  initial_inventory_multiplier_range: [0.0, 2.0]
+  mode: paper_table_1
+  price_mean: 20.0
+  holding_cost_mean: 1.0
+  mean_demand_mean: 10.0
+  lost_sale_penalty_max: 3.0
+  coefficient_of_variation_range: [0.0, 1.0]
 
 tuning:
   min_stock_level: 0

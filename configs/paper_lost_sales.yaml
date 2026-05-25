@@ -1,5 +1,4 @@
 # Maggiar et al. (2025) lost-sales replication configuration.
-# TODO: Verify all product-economics sampling ranges against the paper appendix/code if available.
 
 history_length_H: 32
 training_horizon_T: 100
@@ -31,16 +30,14 @@ product_features:
   - mean_demand
   - coefficient_of_variation
 
-# TODO: Replace these synthetic ranges with exact paper ranges when verified.
 product_generation:
   seed: 2025
-  price_range: [8.0, 20.0]
-  purchase_cost_fraction_range: [0.35, 0.75]
-  holding_cost_fraction_range: [0.01, 0.08]
-  lost_sale_penalty_fraction_range: [0.1, 0.8]
-  mean_demand_range: [4.0, 40.0]
-  coefficient_of_variation_range: [0.2, 1.2]
-  initial_inventory_multiplier_range: [0.0, 2.0]
+  mode: paper_table_1
+  price_mean: 100.0
+  holding_cost_mean: 5.0
+  mean_demand_mean: 100.0
+  lost_sale_penalty_max: 10.0
+  coefficient_of_variation_range: [0.0, 1.0]
 
 tuning:
   min_stock_level: 0
