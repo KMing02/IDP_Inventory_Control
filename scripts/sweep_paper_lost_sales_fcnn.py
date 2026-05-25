@@ -18,9 +18,9 @@ from inventory_control.paper_evaluation import (
 )
 from inventory_control.paper_lost_sales import evaluate_paper_lost_sales_policy, historical_demand_base_stock_policy
 from inventory_control.policies.neural.fcnn import (
-    FCNNPolicy,
     PaperFCNNPolicyAdapter,
     compute_paper_fcnn_feature_stats,
+    make_paper_fcnn_model,
 )
 from inventory_control.products import PaperLostSalesProductGenerator
 from inventory_control.training.direct_backprop import train_paper_lost_sales_fcnn
@@ -44,14 +44,18 @@ def _mean_policy_reward(config, products, policy_factory, seed_start: int) -> fl
 def main() -> None:
     """Train several FCNN configurations and save validation/test rewards."""
     config = load_paper_lost_sales_config()
+    runtime = config.get("runtime", {})
     generator = PaperLostSalesProductGenerator(config)
     n_products = min(int(config["training_products"]), int(config["runtime"]["fcnn_train_products"]))
     train_products = generator.generate(n_products, split="train")
-    validation_products = generator.generate(min(20, int(config["runtime"]["fcnn_test_products"])), split="validation")
+    validation_products = generator.generate(
+        min(int(runtime.get("fcnn_validation_products", 20)), int(runtime["fcnn_test_products"])),
+        split="validation",
+    )
     test_products = generator.generate(paper_test_product_count(config), split="test")
     feature_stats = compute_paper_fcnn_feature_stats(train_products)
     max_order_factor = float(config["fcnn"].get("max_order_factor", 2.0))
-    input_dim = 1 + int(config["history_length_H"]) + 4
+    scale_action_by_history_mean = bool(config["fcnn"].get("scale_action_by_history_mean", False))
 
     sweep_configs = [(2, 32), (3, 64), (3, 128)]
     rows = []
@@ -70,14 +74,10 @@ def main() -> None:
 
     for hidden_layers, hidden_units in sweep_configs:
         torch.manual_seed(int(config["product_generation"]["seed"]))
-        model = FCNNPolicy(
-            input_dim=input_dim,
-            hidden_layers=hidden_layers,
-            hidden_units=hidden_units,
-            activation=str(config["fcnn"]["activation"]),
-        )
+        model_config = {**config, "fcnn": {**config["fcnn"], "hidden_layers": hidden_layers, "hidden_units": hidden_units}}
+        model = make_paper_fcnn_model(model_config)
 
-        def validation_callback(epoch: int, current_model: FCNNPolicy) -> float:
+        def validation_callback(epoch: int, current_model) -> float:
             return _mean_policy_reward(
                 config,
                 validation_products,
@@ -86,6 +86,7 @@ def main() -> None:
                     product,
                     feature_stats=feature_stats,
                     max_order_factor=max_order_factor,
+                    scale_action_by_history_mean=scale_action_by_history_mean,
                 ),
                 seed_start=PAPER_VALIDATION_EVALUATION_SEED_START,
             )
@@ -95,7 +96,7 @@ def main() -> None:
             model,
             horizon=int(config["training_horizon_T"]),
             batch_size=min(int(config["batch_size"]), n_products),
-            epochs=min(int(config["epochs"]), 50),
+            epochs=min(int(config["epochs"]), int(runtime.get("fcnn_train_epochs", 50))),
             learning_rate=float(config["learning_rate"]),
             seed=int(config["product_generation"]["seed"]),
             imitation_epochs=int(config["fcnn"].get("imitation_epochs", 0)),
@@ -104,6 +105,7 @@ def main() -> None:
             validation_callback=validation_callback,
             feature_stats=feature_stats,
             max_order_factor=max_order_factor,
+            scale_action_by_history_mean=scale_action_by_history_mean,
         )
         if result.best_state_dict is not None:
             model.load_state_dict(result.best_state_dict)
@@ -115,6 +117,7 @@ def main() -> None:
                 product,
                 feature_stats=feature_stats,
                 max_order_factor=max_order_factor,
+                scale_action_by_history_mean=scale_action_by_history_mean,
             ),
             seed_start=PAPER_VALIDATION_EVALUATION_SEED_START,
         )
@@ -126,6 +129,7 @@ def main() -> None:
                 product,
                 feature_stats=feature_stats,
                 max_order_factor=max_order_factor,
+                scale_action_by_history_mean=scale_action_by_history_mean,
             ),
             seed_start=PAPER_TEST_EVALUATION_SEED_START,
         )

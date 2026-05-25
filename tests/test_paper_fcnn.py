@@ -2,7 +2,12 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from inventory_control.policies.neural.fcnn import FCNNPolicy, PaperFCNNPolicyAdapter, compute_paper_fcnn_feature_stats
+from inventory_control.policies.neural.fcnn import (
+    FCNNPolicy,
+    PaperCausalCNNPolicy,
+    PaperFCNNPolicyAdapter,
+    compute_paper_fcnn_feature_stats,
+)
 from inventory_control.training.direct_backprop import (
     make_paper_lost_sales_training_batch,
     paper_lost_sales_fcnn_order,
@@ -15,6 +20,16 @@ from tests.test_paper_lost_sales import _paper_config
 
 def test_fcnn_output_is_nonnegative() -> None:
     model = FCNNPolicy(input_dim=37, hidden_layers=2, hidden_units=8, activation="ELU")
+    features = torch.randn(4, 37)
+
+    orders = model(features)
+
+    assert orders.shape == (4,)
+    assert torch.all(orders >= 0)
+
+
+def test_paper_causal_cnn_policy_output_is_nonnegative() -> None:
+    model = PaperCausalCNNPolicy(history_length=32, hidden_layers=1, hidden_units=8, cnn_channels=4, cnn_dilations=(1, 2))
     features = torch.randn(4, 37)
 
     orders = model(features)
@@ -86,6 +101,39 @@ def test_training_and_evaluation_use_same_fcnn_preprocessing() -> None:
     inventory = torch.tensor([float(product.initial_inventory)])
 
     training_order = float(paper_lost_sales_fcnn_order(model, batch, inventory, max_order_factor=2.0).item())
+    evaluation_order = adapter.act(float(product.initial_inventory), t=0)
+
+    assert training_order == pytest.approx(evaluation_order)
+
+
+def test_scaled_action_path_matches_training_and_evaluation() -> None:
+    product = PaperLostSalesProductGenerator(_paper_config()).generate(1, "test")[0]
+    feature_stats = compute_paper_fcnn_feature_stats([product])
+    model = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
+    adapter = PaperFCNNPolicyAdapter(
+        model,
+        product,
+        feature_stats=feature_stats,
+        max_order_factor=4.0,
+        scale_action_by_history_mean=True,
+    )
+    batch = make_paper_lost_sales_training_batch(
+        [product],
+        horizon=1,
+        generator=torch.Generator().manual_seed(0),
+        feature_stats=feature_stats,
+    )
+    inventory = torch.tensor([float(product.initial_inventory)])
+
+    training_order = float(
+        paper_lost_sales_fcnn_order(
+            model,
+            batch,
+            inventory,
+            max_order_factor=4.0,
+            scale_action_by_history_mean=True,
+        ).item()
+    )
     evaluation_order = adapter.act(float(product.initial_inventory), t=0)
 
     assert training_order == pytest.approx(evaluation_order)

@@ -12,7 +12,11 @@ from inventory_control.paper_lost_sales import (
     evaluate_paper_lost_sales_policy,
     historical_demand_base_stock_policy,
 )
-from inventory_control.policies.neural.fcnn import FCNNPolicy, PaperFCNNPolicyAdapter, compute_paper_fcnn_feature_stats
+from inventory_control.policies.neural.fcnn import (
+    PaperFCNNPolicyAdapter,
+    compute_paper_fcnn_feature_stats,
+    make_paper_fcnn_model,
+)
 from inventory_control.products import PaperLostSalesProductGenerator
 from inventory_control.training.direct_backprop import train_paper_lost_sales_fcnn
 
@@ -23,12 +27,8 @@ def main() -> None:
     product = PaperLostSalesProductGenerator(config).generate(1, split="train")[0]
     feature_stats = compute_paper_fcnn_feature_stats([product])
     max_order_factor = float(config["fcnn"].get("max_order_factor", 2.0))
-    model = FCNNPolicy(
-        input_dim=1 + int(config["history_length_H"]) + 4,
-        hidden_layers=int(config["fcnn"]["hidden_layers"]),
-        hidden_units=int(config["fcnn"]["hidden_units"]),
-        activation=str(config["fcnn"]["activation"]),
-    )
+    scale_action_by_history_mean = bool(config["fcnn"].get("scale_action_by_history_mean", False))
+    model = make_paper_fcnn_model(config)
     result = train_paper_lost_sales_fcnn(
         [product],
         model,
@@ -40,10 +40,17 @@ def main() -> None:
         imitation_epochs=50,
         feature_stats=feature_stats,
         max_order_factor=max_order_factor,
+        scale_action_by_history_mean=scale_action_by_history_mean,
     )
     fcnn_metrics = evaluate_paper_lost_sales_policy(
         product,
-        PaperFCNNPolicyAdapter(model, product, feature_stats=feature_stats, max_order_factor=max_order_factor),
+        PaperFCNNPolicyAdapter(
+            model,
+            product,
+            feature_stats=feature_stats,
+            max_order_factor=max_order_factor,
+            scale_action_by_history_mean=scale_action_by_history_mean,
+        ),
         horizon=int(config["evaluation_horizon"]),
         n_episodes=1,
         seed=55_000,

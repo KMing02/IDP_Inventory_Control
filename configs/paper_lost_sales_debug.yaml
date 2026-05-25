@@ -13,13 +13,17 @@ optimizer: Adam
 learning_rate: 0.001
 
 fcnn:
+  history_encoder: causal_cnn
   hidden_layers: 1
   hidden_units: 8
+  cnn_channels: 4
+  cnn_dilations: [1, 2]
   activation: ELU
   imitation_epochs: 1
   validation_interval: 1
   use_full_history: true
-  max_order_factor: 2.0
+  scale_action_by_history_mean: true
+  max_order_factor: 4.0
 
 demand_distribution: Gamma
 
@@ -51,3 +55,5 @@ runtime:
   baseline_eval_products: 6
   fcnn_train_products: 8
   fcnn_test_products: 6
+  fcnn_validation_products: 2
+  fcnn_train_epochs: 2

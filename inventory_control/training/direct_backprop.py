@@ -11,6 +11,8 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise ImportError("Install neural dependencies with `python -m pip install -r requirements-neural.txt`.") from exc
 
+from torch import nn
+
 from inventory_control.policies.neural.fcnn import FCNNPolicy, PaperFCNNFeatureStats
 from inventory_control.paper_lost_sales import historical_demand_base_stock_policy
 from inventory_control.products import PaperLostSalesProduct
@@ -23,7 +25,7 @@ PAPER_FCNN_MAX_ORDER_FACTOR = 2.0
 class DirectBackpropResult:
     """Training result for DirectBackprop FCNN."""
 
-    model: FCNNPolicy
+    model: nn.Module
     training_losses: list[float]
     mean_total_rewards: list[float]
     validation_rewards: list[float] | None = None
@@ -96,10 +98,11 @@ def make_paper_lost_sales_training_batch(
 
 
 def paper_lost_sales_fcnn_order(
-    model: FCNNPolicy,
+    model: nn.Module,
     batch: dict[str, torch.Tensor],
     inventory: torch.Tensor,
     max_order_factor: float = PAPER_FCNN_MAX_ORDER_FACTOR,
+    scale_action_by_history_mean: bool = False,
 ) -> torch.Tensor:
     """Return capped FCNN orders for a batch and inventory vector."""
     demand_scale = torch.clamp(batch["feature_demand_scale"], min=1.0)
@@ -116,13 +119,17 @@ def paper_lost_sales_fcnn_order(
     features = torch.cat([(inventory / demand_scale).unsqueeze(-1), batch["history"], economics], dim=1)
     max_inventory_level = float(max_order_factor) * torch.clamp(batch["historical_mean_demand"], min=1.0)
     order_cap = torch.relu(max_inventory_level - inventory)
-    return torch.minimum(model(features), order_cap)
+    order = model(features)
+    if scale_action_by_history_mean:
+        order = order * torch.clamp(batch["historical_mean_demand"], min=1.0)
+    return torch.minimum(order, order_cap)
 
 
 def paper_lost_sales_fcnn_rollout(
-    model: FCNNPolicy,
+    model: nn.Module,
     batch: dict[str, torch.Tensor],
     max_order_factor: float = PAPER_FCNN_MAX_ORDER_FACTOR,
+    scale_action_by_history_mean: bool = False,
 ) -> torch.Tensor:
     """Return total reward per product for FCNN training."""
     inventory = batch["initial_inventory"]
@@ -130,7 +137,13 @@ def paper_lost_sales_fcnn_rollout(
     horizon = demand_paths.shape[1]
     total_reward = torch.zeros_like(inventory)
     for t in range(horizon):
-        order = paper_lost_sales_fcnn_order(model, batch, inventory, max_order_factor=max_order_factor)
+        order = paper_lost_sales_fcnn_order(
+            model,
+            batch,
+            inventory,
+            max_order_factor=max_order_factor,
+            scale_action_by_history_mean=scale_action_by_history_mean,
+        )
         demand = demand_paths[:, t]
         available = inventory + order
         sales = torch.minimum(demand, available)
@@ -148,11 +161,12 @@ def paper_lost_sales_fcnn_rollout(
 
 
 def historical_base_stock_imitation_loss(
-    model: FCNNPolicy,
+    model: nn.Module,
     batch: dict[str, torch.Tensor],
     generator: torch.Generator,
     samples_per_product: int = 4,
     max_order_factor: float = PAPER_FCNN_MAX_ORDER_FACTOR,
+    scale_action_by_history_mean: bool = False,
 ) -> torch.Tensor:
     """Supervised warm-start loss matching historical base-stock actions."""
     batch_size = batch["initial_inventory"].shape[0]
@@ -161,7 +175,13 @@ def historical_base_stock_imitation_loss(
     for _ in range(samples_per_product):
         random_fraction = torch.rand(batch_size, generator=generator)
         inventory = random_fraction * max_inventory_level
-        predicted = paper_lost_sales_fcnn_order(model, batch, inventory, max_order_factor=max_order_factor)
+        predicted = paper_lost_sales_fcnn_order(
+            model,
+            batch,
+            inventory,
+            max_order_factor=max_order_factor,
+            scale_action_by_history_mean=scale_action_by_history_mean,
+        )
         target = torch.relu(batch["historical_base_stock_level"] - inventory)
         target = torch.minimum(target, torch.relu(max_inventory_level - inventory))
         repeated_losses.append(torch.mean((predicted - target) ** 2))
@@ -170,7 +190,7 @@ def historical_base_stock_imitation_loss(
 
 def train_paper_lost_sales_fcnn(
     products: list[PaperLostSalesProduct],
-    model: FCNNPolicy,
+    model: nn.Module,
     horizon: int,
     batch_size: int,
     epochs: int,
@@ -179,9 +199,10 @@ def train_paper_lost_sales_fcnn(
     imitation_epochs: int = 0,
     validation_products: list[PaperLostSalesProduct] | None = None,
     validation_interval: int = 0,
-    validation_callback: Callable[[int, FCNNPolicy], float] | None = None,
+    validation_callback: Callable[[int, nn.Module], float] | None = None,
     feature_stats: PaperFCNNFeatureStats | None = None,
     max_order_factor: float = PAPER_FCNN_MAX_ORDER_FACTOR,
+    scale_action_by_history_mean: bool = False,
 ) -> DirectBackpropResult:
     """Train FCNN with DirectBackprop-style negative reward minimization."""
     torch.manual_seed(seed)
@@ -200,15 +221,26 @@ def train_paper_lost_sales_fcnn(
         batch_products = [products[index] for index in indices]
         batch = make_paper_lost_sales_training_batch(batch_products, horizon, generator, feature_stats=feature_stats)
         if epoch < imitation_epochs:
-            mean_total_reward = paper_lost_sales_fcnn_rollout(model, batch, max_order_factor=max_order_factor).mean()
+            mean_total_reward = paper_lost_sales_fcnn_rollout(
+                model,
+                batch,
+                max_order_factor=max_order_factor,
+                scale_action_by_history_mean=scale_action_by_history_mean,
+            ).mean()
             loss = historical_base_stock_imitation_loss(
                 model,
                 batch,
                 generator,
                 max_order_factor=max_order_factor,
+                scale_action_by_history_mean=scale_action_by_history_mean,
             )
         else:
-            mean_total_reward = paper_lost_sales_fcnn_rollout(model, batch, max_order_factor=max_order_factor).mean()
+            mean_total_reward = paper_lost_sales_fcnn_rollout(
+                model,
+                batch,
+                max_order_factor=max_order_factor,
+                scale_action_by_history_mean=scale_action_by_history_mean,
+            ).mean()
             loss = -mean_total_reward
         optimizer.zero_grad()
         loss.backward()
@@ -230,6 +262,7 @@ def train_paper_lost_sales_fcnn(
                         model,
                         validation_batch,
                         max_order_factor=max_order_factor,
+                        scale_action_by_history_mean=scale_action_by_history_mean,
                     ).mean()
                 validation_reward = float(validation_reward_tensor.item())
             validation_rewards.append(float(validation_reward))

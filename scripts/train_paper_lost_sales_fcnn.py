@@ -22,7 +22,9 @@ import torch
 from inventory_control.paper_configs import load_paper_lost_sales_config
 from inventory_control.paper_evaluation import PAPER_VALIDATION_EVALUATION_SEED_START
 from inventory_control.paper_lost_sales import evaluate_paper_lost_sales_policy, historical_demand_base_stock_policy
-from inventory_control.policies.neural.fcnn import FCNNPolicy, compute_paper_fcnn_feature_stats
+from torch import nn
+
+from inventory_control.policies.neural.fcnn import compute_paper_fcnn_feature_stats, make_paper_fcnn_model
 from inventory_control.policies.neural.fcnn import PaperFCNNPolicyAdapter
 from inventory_control.products import PaperLostSalesProductGenerator
 from inventory_control.training.direct_backprop import train_paper_lost_sales_fcnn
@@ -32,19 +34,18 @@ def main() -> None:
     """Train and save the paper lost-sales FCNN."""
     config = load_paper_lost_sales_config()
     generator = PaperLostSalesProductGenerator(config)
+    runtime = config.get("runtime", {})
     n_products = min(int(config["training_products"]), int(config["runtime"]["fcnn_train_products"]))
     products = generator.generate(n_products, split="train")
-    validation_products = generator.generate(min(20, int(config["runtime"]["fcnn_test_products"])), split="validation")
+    validation_products = generator.generate(
+        min(int(runtime.get("fcnn_validation_products", 20)), int(runtime["fcnn_test_products"])),
+        split="validation",
+    )
     feature_stats = compute_paper_fcnn_feature_stats(products)
     max_order_factor = float(config["fcnn"].get("max_order_factor", 2.0))
-    input_dim = 1 + int(config["history_length_H"]) + 4
+    scale_action_by_history_mean = bool(config["fcnn"].get("scale_action_by_history_mean", False))
     torch.manual_seed(int(config["product_generation"]["seed"]))
-    model = FCNNPolicy(
-        input_dim=input_dim,
-        hidden_layers=int(config["fcnn"]["hidden_layers"]),
-        hidden_units=int(config["fcnn"]["hidden_units"]),
-        activation=str(config["fcnn"]["activation"]),
-    )
+    model = make_paper_fcnn_model(config)
     baseline_rewards = [
         evaluate_paper_lost_sales_policy(
             product,
@@ -58,7 +59,7 @@ def main() -> None:
     ]
     baseline_mean = sum(baseline_rewards) / len(baseline_rewards)
 
-    def validation_callback(epoch: int, current_model: FCNNPolicy) -> float:
+    def validation_callback(epoch: int, current_model: nn.Module) -> float:
         rewards = [
             evaluate_paper_lost_sales_policy(
                 product,
@@ -67,6 +68,7 @@ def main() -> None:
                     product,
                     feature_stats=feature_stats,
                     max_order_factor=max_order_factor,
+                    scale_action_by_history_mean=scale_action_by_history_mean,
                 ),
                 horizon=int(config["evaluation_horizon"]),
                 n_episodes=1,
@@ -82,7 +84,7 @@ def main() -> None:
         model,
         horizon=int(config["training_horizon_T"]),
         batch_size=min(int(config["batch_size"]), n_products),
-        epochs=min(int(config["epochs"]), 50),
+        epochs=min(int(config["epochs"]), int(runtime.get("fcnn_train_epochs", 50))),
         learning_rate=float(config["learning_rate"]),
         seed=int(config["product_generation"]["seed"]),
         imitation_epochs=int(config["fcnn"].get("imitation_epochs", 0)),
@@ -91,6 +93,7 @@ def main() -> None:
         validation_callback=validation_callback,
         feature_stats=feature_stats,
         max_order_factor=max_order_factor,
+        scale_action_by_history_mean=scale_action_by_history_mean,
     )
     if result.best_state_dict is not None:
         model.load_state_dict(result.best_state_dict)
@@ -99,13 +102,17 @@ def main() -> None:
     torch.save(model.state_dict(), output_path)
     metadata_path = Path("outputs/models/paper_lost_sales_fcnn_metadata.json")
     metadata = {
+        "history_length_H": int(config["history_length_H"]),
+        "history_encoder": str(config["fcnn"].get("history_encoder", "flat")),
         "hidden_layers": int(config["fcnn"]["hidden_layers"]),
         "hidden_units": int(config["fcnn"]["hidden_units"]),
+        "cnn_channels": int(config["fcnn"].get("cnn_channels", 0)),
+        "cnn_dilations": list(config["fcnn"].get("cnn_dilations", [])),
         "activation": str(config["fcnn"]["activation"]),
-        "input_dim": input_dim,
         "feature_demand_scale": feature_stats.demand_scale,
         "feature_price_scale": feature_stats.price_scale,
         "max_order_factor": max_order_factor,
+        "scale_action_by_history_mean": scale_action_by_history_mean,
         "best_validation_mean_total_reward": result.best_validation_reward,
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")

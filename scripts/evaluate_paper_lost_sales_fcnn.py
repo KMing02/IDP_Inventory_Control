@@ -16,10 +16,10 @@ from inventory_control.paper_evaluation import PAPER_TEST_EVALUATION_SEED_START,
 from inventory_control.paper_lost_sales import evaluate_paper_lost_sales_policy
 from inventory_control.paper_lost_sales import historical_demand_base_stock_policy
 from inventory_control.policies.neural.fcnn import (
-    FCNNPolicy,
     PaperFCNNFeatureStats,
     PaperFCNNPolicyAdapter,
     compute_paper_fcnn_feature_stats,
+    make_paper_fcnn_model,
 )
 from inventory_control.products import PaperLostSalesProductGenerator
 
@@ -30,13 +30,7 @@ def main() -> None:
     model_path = Path("outputs/models/paper_lost_sales_fcnn.pt")
     metadata_path = Path("outputs/models/paper_lost_sales_fcnn_metadata.json")
     metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
-    input_dim = int(metadata.get("input_dim", 1 + int(config["history_length_H"]) + 4))
-    model = FCNNPolicy(
-        input_dim=input_dim,
-        hidden_layers=int(metadata.get("hidden_layers", config["fcnn"]["hidden_layers"])),
-        hidden_units=int(metadata.get("hidden_units", config["fcnn"]["hidden_units"])),
-        activation=str(metadata.get("activation", config["fcnn"]["activation"])),
-    )
+    model = make_paper_fcnn_model(config, metadata=metadata)
     model.load_state_dict(torch.load(model_path, weights_only=True))
     generator = PaperLostSalesProductGenerator(config)
     n_training_products = min(int(config["training_products"]), int(config["runtime"]["fcnn_train_products"]))
@@ -49,6 +43,9 @@ def main() -> None:
     else:
         feature_stats = compute_paper_fcnn_feature_stats(training_products)
     max_order_factor = float(metadata.get("max_order_factor", config["fcnn"].get("max_order_factor", 2.0)))
+    scale_action_by_history_mean = bool(
+        metadata.get("scale_action_by_history_mean", config["fcnn"].get("scale_action_by_history_mean", False))
+    )
     n_products = paper_test_product_count(config)
     products = generator.generate(n_products, split="test")
     rows = []
@@ -58,6 +55,7 @@ def main() -> None:
             product,
             feature_stats=feature_stats,
             max_order_factor=max_order_factor,
+            scale_action_by_history_mean=scale_action_by_history_mean,
         )
         metrics = evaluate_paper_lost_sales_policy(
             product,

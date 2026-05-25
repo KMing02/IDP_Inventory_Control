@@ -18,10 +18,10 @@ import torch
 from inventory_control.paper_configs import load_paper_lost_sales_config
 from inventory_control.paper_lost_sales import monotonicity_violation_rate
 from inventory_control.policies.neural.fcnn import (
-    FCNNPolicy,
     PaperFCNNFeatureStats,
     build_paper_lost_sales_features,
     compute_paper_fcnn_feature_stats,
+    make_paper_fcnn_model,
 )
 from inventory_control.products import PaperLostSalesProductGenerator
 
@@ -32,13 +32,7 @@ def main() -> None:
     model_path = Path("outputs/models/paper_lost_sales_fcnn.pt")
     metadata_path = Path("outputs/models/paper_lost_sales_fcnn_metadata.json")
     metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
-    input_dim = int(metadata.get("input_dim", 1 + int(config["history_length_H"]) + 4))
-    model = FCNNPolicy(
-        input_dim=input_dim,
-        hidden_layers=int(metadata.get("hidden_layers", config["fcnn"]["hidden_layers"])),
-        hidden_units=int(metadata.get("hidden_units", config["fcnn"]["hidden_units"])),
-        activation=str(metadata.get("activation", config["fcnn"]["activation"])),
-    )
+    model = make_paper_fcnn_model(config, metadata=metadata)
     model.load_state_dict(torch.load(model_path, weights_only=True))
     model.eval()
     generator = PaperLostSalesProductGenerator(config)
@@ -52,6 +46,9 @@ def main() -> None:
         feature_stats = compute_paper_fcnn_feature_stats(generator.generate(n_training_products, split="train"))
     product = generator.generate(1, split="test")[0]
     max_order_factor = float(metadata.get("max_order_factor", config["fcnn"].get("max_order_factor", 2.0)))
+    scale_action_by_history_mean = bool(
+        metadata.get("scale_action_by_history_mean", config["fcnn"].get("scale_action_by_history_mean", False))
+    )
 
     def feature_builder(inventory: float):
         return build_paper_lost_sales_features(
@@ -70,6 +67,8 @@ def main() -> None:
             order = float(model(tensor).item())
         inventory = features[0] * feature_stats.demand_scale
         historical_mean = max(sum(product.historical_demand) / len(product.historical_demand), 1.0)
+        if scale_action_by_history_mean:
+            order *= historical_mean
         max_inventory_level = max_order_factor * historical_mean
         return min(order, max(max_inventory_level - inventory, 0.0))
 
