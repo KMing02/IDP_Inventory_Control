@@ -25,6 +25,15 @@ fcnn:
   scale_action_by_history_mean: true
   max_order_factor: 4.0
 
+monokan:
+  hidden_layers: 1
+  hidden_units: 4
+  grid: 3
+  grid_range: [-2.0, 4.0]
+  monotonic_inventory: nonincreasing
+  scale_action_by_history_mean: true
+  max_order_factor: 2.0
+
 demand_distribution: Gamma
 
 product_features:
@@ -57,3 +66,7 @@ runtime:
   fcnn_test_products: 6
   fcnn_validation_products: 2
   fcnn_train_epochs: 2
+  monokan_sweep_train_products: 8
+  monokan_sweep_batch_size: 4
+  monokan_sweep_horizon: 8
+  monokan_sweep_epochs: 2

@@ -245,6 +245,8 @@ def train_paper_lost_sales_fcnn(
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        if hasattr(model, "apply_monotonic_constraints"):
+            model.apply_monotonic_constraints()
         training_losses.append(float(loss.detach().item()))
         mean_total_rewards.append(float(mean_total_reward.detach().item()))
         if validation_products and validation_interval and (epoch + 1) % validation_interval == 0:

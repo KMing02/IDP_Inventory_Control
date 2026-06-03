@@ -1,12 +1,12 @@
 # Structure-Informed Neural Inventory Control Benchmark
 
-This repository is a research codebase for structure-informed neural inventory control. The goal is to compare neural policy architectures later, including unconstrained MLPs, monotonic MLPs, MonoKAN, and optionally MLPs with monotonicity penalties.
+This repository is a research codebase for structure-informed neural inventory control. The goal is to compare neural policy architectures, including unconstrained FCNNs, MonoKAN, and optionally MLPs with monotonicity penalties.
 
 This is not a generic reinforcement learning benchmark. The intended training direction is DirectBackprop-style differentiable policy optimization through inventory simulators, where domain structure is injected through inventory balance equations, lead-time pipeline states, monotonicity of order quantities with respect to inventory position, and classical heuristic baselines.
 
 The current priority is replicating the lost-sales setting from Maggiar et al. (2025), "Structure-Informed Deep Reinforcement Learning for Inventory Management". Generic benchmark scenarios remain in the repository, but they are secondary until the lost-sales replication is stable.
 
-The current implementation includes clean true simulators, demand processes, heuristic baselines, evaluation, plotting, tests, a paper-style lost-sales replication layer, and initial unconstrained FCNN training paths. Monotone MLP and MonoKAN policies are future work.
+The current implementation includes clean true simulators, demand processes, heuristic baselines, evaluation, plotting, tests, a paper-style lost-sales replication layer, an unconstrained FCNN training path, and an initial adapted MonoKAN policy module.
 
 ## Project Status
 
@@ -19,10 +19,10 @@ Current status:
 
 Current limitations:
 
-- Paper lost-sales product generation follows Table 1 of Maggiar et al. for the synthetic LS setting, but the policy architecture is still a simplified FCNN rather than the paper's causal-CNN history encoder plus MLP.
+- Paper lost-sales product generation follows Table 1 of Maggiar et al. for the synthetic LS setting, and the FCNN path uses the current paper-style observable feature pipeline.
 - `OracleGammaBaseStock` is an oracle critical-quantile base-stock benchmark, not a globally optimal dynamic policy.
-- Differentiable training currently exists for the FCNN path only.
-- MonoMLP, MonoKAN, multi-echelon, perishability, and procurement-removal settings are not implemented yet.
+- Differentiable training is validated for the FCNN path; the adapted MonoKAN module is implemented and unit-tested but has not yet been fully benchmarked.
+- MonoMLP, multi-echelon, perishability, and procurement-removal settings are not implemented yet.
 - Generated outputs and model checkpoints are intentionally ignored by Git and are not required for tests.
 
 ## Setup
@@ -135,7 +135,17 @@ python scripts/run_quick_smoke_test.py
 python scripts/run_paper_lost_sales_baselines.py
 python scripts/train_paper_lost_sales_fcnn.py
 python scripts/evaluate_paper_lost_sales_fcnn.py
+python scripts/train_paper_lost_sales_monokan.py
+python scripts/evaluate_paper_lost_sales_monokan.py
 python scripts/analyze_paper_lost_sales_fcnn_failures.py
+```
+
+The evaluation scripts default to the validation split. The held-out test split should be used only for the final report:
+
+```bash
+python scripts/run_paper_lost_sales_baselines.py --split test --final-test
+python scripts/evaluate_paper_lost_sales_fcnn.py --split test --final-test
+python scripts/evaluate_paper_lost_sales_monokan.py --split test --final-test
 ```
 
 ## Reward And Cost Naming
@@ -194,7 +204,7 @@ python scripts/run_paper_lost_sales_baselines.py
 This writes:
 
 ```text
-outputs/results/paper_lost_sales_baselines.csv
+outputs/results/paper_lost_sales_baselines_validation.csv
 ```
 
 The two explicit baselines are:
@@ -225,7 +235,46 @@ python scripts/evaluate_paper_lost_sales_fcnn.py
 This writes:
 
 ```text
-outputs/results/paper_lost_sales_fcnn_eval.csv
+outputs/results/paper_lost_sales_fcnn_eval_validation.csv
+```
+
+Train the adapted MonoKAN policy:
+
+```bash
+python scripts/train_paper_lost_sales_monokan.py
+```
+
+The current MonoKAN implementation adapts the MIT-licensed Hermite-spline monotonicity mechanism from the official MonoKAN repository. It constrains order quantity to be nonincreasing in current inventory before action scaling/clipping. This is implemented and unit-tested, but it should be treated as preliminary until benchmarked against FCNN and base-stock baselines.
+
+Training writes:
+
+```text
+outputs/results/paper_lost_sales_monokan_training_log.csv
+outputs/models/paper_lost_sales_monokan.pt
+```
+
+Evaluate the saved MonoKAN:
+
+```bash
+python scripts/evaluate_paper_lost_sales_monokan.py
+```
+
+This writes:
+
+```text
+outputs/results/paper_lost_sales_monokan_eval_validation.csv
+```
+
+Run a validation-only MonoKAN tuning sweep:
+
+```bash
+python scripts/sweep_paper_lost_sales_monokan.py
+```
+
+This writes:
+
+```text
+outputs/results/paper_lost_sales_monokan_sweep_validation.csv
 ```
 
 Sweep stronger FCNN sizes:
@@ -252,7 +301,7 @@ This writes:
 outputs/plots/paper_lost_sales_policy_structure.png
 ```
 
-The main evaluation focus is FCNN performance, policy structure, and monotonicity diagnostics. Dual sourcing, perishability, and procurement-removal are later paper-setting extensions.
+The main evaluation focus is FCNN/MonoKAN performance, policy structure, and monotonicity diagnostics. Dual sourcing, perishability, and procurement-removal are later paper-setting extensions.
 
 Analyze FCNN vs base-stock baselines:
 
@@ -263,8 +312,8 @@ python scripts/analyze_paper_lost_sales_fcnn_failures.py
 This writes:
 
 ```text
-outputs/results/paper_lost_sales_policy_comparison_summary.csv
-outputs/results/paper_lost_sales_fcnn_worst_cases.csv
+outputs/results/paper_lost_sales_policy_comparison_summary_validation.csv
+outputs/results/paper_lost_sales_fcnn_worst_cases_validation.csv
 ```
 
 ## Run Original Baselines

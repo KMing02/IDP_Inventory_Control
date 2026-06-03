@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 from pathlib import Path
 import sys
 
@@ -11,7 +12,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pandas as pd
 
 from inventory_control.paper_configs import load_paper_lost_sales_config
-from inventory_control.paper_evaluation import PAPER_TEST_EVALUATION_SEED_START, paper_test_product_count
+from inventory_control.paper_evaluation import (
+    paper_evaluation_product_count,
+    paper_evaluation_seed_start,
+    require_final_test_confirmation,
+)
 from inventory_control.paper_lost_sales import (
     evaluate_paper_lost_sales_policy,
     historical_demand_base_stock_policy,
@@ -22,10 +27,17 @@ from inventory_control.products import PaperLostSalesProductGenerator
 
 def main() -> None:
     """Evaluate oracle and historical base-stock policies."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--split", choices=["validation", "test"], default="validation")
+    parser.add_argument("--final-test", action="store_true", help="Required when evaluating the held-out test set.")
+    args = parser.parse_args()
+    require_final_test_confirmation(args.split, args.final_test)
+
     config = load_paper_lost_sales_config()
     generator = PaperLostSalesProductGenerator(config)
-    n_products = paper_test_product_count(config)
-    products = generator.generate(n_products, split="test")
+    n_products = paper_evaluation_product_count(config, args.split)
+    seed_start = paper_evaluation_seed_start(args.split)
+    products = generator.generate(n_products, split=args.split)
     rows = []
     for index, product in enumerate(products):
         policies = [
@@ -42,14 +54,15 @@ def main() -> None:
                 policy,
                 horizon=int(config["evaluation_horizon"]),
                 n_episodes=1,
-                seed=PAPER_TEST_EVALUATION_SEED_START + index,
+                seed=seed_start + index,
                 burn_in=int(config["burn_in"]),
             )
             rows.append(
                 {
                     "product_id": product.product_id,
                     "policy_name": policy.name,
-                    "evaluation_seed": PAPER_TEST_EVALUATION_SEED_START + index,
+                    "evaluation_split": args.split,
+                    "evaluation_seed": seed_start + index,
                     "evaluation_horizon": int(config["evaluation_horizon"]),
                     "burn_in": int(config["burn_in"]),
                     "tuned_parameters": json.dumps({"S": policy.S}, sort_keys=True),
@@ -57,7 +70,8 @@ def main() -> None:
                 }
             )
     results = pd.DataFrame(rows)
-    output_path = Path("outputs/results/paper_lost_sales_baselines.csv")
+    suffix = "" if args.split == "test" else "_validation"
+    output_path = Path(f"outputs/results/paper_lost_sales_baselines{suffix}.csv")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     results.to_csv(output_path, index=False)
     print(

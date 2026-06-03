@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import sys
 
@@ -11,13 +12,18 @@ import numpy as np
 import pandas as pd
 
 from inventory_control.paper_configs import load_paper_lost_sales_config
-from inventory_control.paper_evaluation import PAPER_TEST_EVALUATION_SEED_START, paper_test_product_count
+from inventory_control.paper_evaluation import (
+    paper_evaluation_product_count,
+    paper_evaluation_seed_start,
+    require_final_test_confirmation,
+)
 from inventory_control.products import PaperLostSalesProductGenerator
 
 
-def _load_policy_results() -> pd.DataFrame:
-    baseline_path = Path("outputs/results/paper_lost_sales_baselines.csv")
-    fcnn_path = Path("outputs/results/paper_lost_sales_fcnn_eval.csv")
+def _load_policy_results(split: str) -> pd.DataFrame:
+    suffix = "" if split == "test" else "_validation"
+    baseline_path = Path(f"outputs/results/paper_lost_sales_baselines{suffix}.csv")
+    fcnn_path = Path(f"outputs/results/paper_lost_sales_fcnn_eval{suffix}.csv")
     if not baseline_path.exists() or not fcnn_path.exists():
         raise FileNotFoundError(
             "Run scripts/run_paper_lost_sales_baselines.py and "
@@ -26,14 +32,15 @@ def _load_policy_results() -> pd.DataFrame:
     return pd.concat([pd.read_csv(baseline_path), pd.read_csv(fcnn_path)], ignore_index=True)
 
 
-def _assert_common_test_products_and_seeds(results: pd.DataFrame, config: dict) -> None:
-    expected_count = paper_test_product_count(config)
-    expected_products = [f"test_{idx:06d}" for idx in range(expected_count)]
-    expected_seeds = {product_id: PAPER_TEST_EVALUATION_SEED_START + idx for idx, product_id in enumerate(expected_products)}
+def _assert_common_products_and_seeds(results: pd.DataFrame, config: dict, split: str) -> None:
+    expected_count = paper_evaluation_product_count(config, split)
+    expected_products = [f"{split}_{idx:06d}" for idx in range(expected_count)]
+    seed_start = paper_evaluation_seed_start(split)
+    expected_seeds = {product_id: seed_start + idx for idx, product_id in enumerate(expected_products)}
     for policy_name, policy_results in results.groupby("policy_name"):
         product_ids = policy_results["product_id"].tolist()
         if product_ids != expected_products:
-            raise ValueError(f"{policy_name} is not evaluated on the common ordered test product set.")
+            raise ValueError(f"{policy_name} is not evaluated on the common ordered {split} product set.")
         if "evaluation_seed" in policy_results.columns:
             observed = dict(zip(policy_results["product_id"], policy_results["evaluation_seed"]))
             if observed != expected_seeds:
@@ -67,8 +74,8 @@ def _comparison_summary(results: pd.DataFrame) -> pd.DataFrame:
     return summary
 
 
-def _product_features(config: dict) -> pd.DataFrame:
-    products = PaperLostSalesProductGenerator(config).generate(paper_test_product_count(config), split="test")
+def _product_features(config: dict, split: str) -> pd.DataFrame:
+    products = PaperLostSalesProductGenerator(config).generate(paper_evaluation_product_count(config, split), split=split)
     rows = []
     for product in products:
         history = np.asarray(product.historical_demand, dtype=float)
@@ -87,7 +94,7 @@ def _product_features(config: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _worst_cases(results: pd.DataFrame, config: dict) -> pd.DataFrame:
+def _worst_cases(results: pd.DataFrame, config: dict, split: str) -> pd.DataFrame:
     pivot = results.pivot(index="product_id", columns="policy_name", values="mean_total_reward").reset_index()
     pivot = pivot.rename(
         columns={
@@ -114,7 +121,7 @@ def _worst_cases(results: pd.DataFrame, config: dict) -> pd.DataFrame:
         frame = results.loc[results["policy_name"] == policy_name, columns].copy()
         frame = frame.rename(columns={column: f"{prefix}_{column}" for column in columns if column != "product_id"})
         order_stats[policy_name] = frame
-    worst = pivot.merge(_product_features(config), on="product_id", how="left")
+    worst = pivot.merge(_product_features(config, split), on="product_id", how="left")
     for frame in order_stats.values():
         worst = worst.merge(frame, on="product_id", how="left")
     worst["fcnn_minus_historical_reward"] = worst["fcnn_mean_total_reward"] - worst["historical_mean_total_reward"]
@@ -124,19 +131,26 @@ def _worst_cases(results: pd.DataFrame, config: dict) -> pd.DataFrame:
 
 def main() -> None:
     """Create aggregate comparison and FCNN worst-case analysis CSVs."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--split", choices=["validation", "test"], default="validation")
+    parser.add_argument("--final-test", action="store_true", help="Required when analyzing held-out test results.")
+    args = parser.parse_args()
+    require_final_test_confirmation(args.split, args.final_test)
+
     config = load_paper_lost_sales_config()
-    results = _load_policy_results()
+    results = _load_policy_results(args.split)
     required = {"FCNN", "HistoricalDemandBaseStock", "OracleGammaBaseStock"}
     observed = set(results["policy_name"])
     if not required.issubset(observed):
         raise ValueError(f"Missing required policies: {sorted(required - observed)}")
-    _assert_common_test_products_and_seeds(results, config)
+    _assert_common_products_and_seeds(results, config, args.split)
 
     summary = _comparison_summary(results)
-    worst = _worst_cases(results, config)
+    worst = _worst_cases(results, config, args.split)
 
-    summary_path = Path("outputs/results/paper_lost_sales_policy_comparison_summary.csv")
-    worst_path = Path("outputs/results/paper_lost_sales_fcnn_worst_cases.csv")
+    suffix = "" if args.split == "test" else "_validation"
+    summary_path = Path(f"outputs/results/paper_lost_sales_policy_comparison_summary{suffix}.csv")
+    worst_path = Path(f"outputs/results/paper_lost_sales_fcnn_worst_cases{suffix}.csv")
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary.to_csv(summary_path, index=False)
     worst.to_csv(worst_path, index=False)

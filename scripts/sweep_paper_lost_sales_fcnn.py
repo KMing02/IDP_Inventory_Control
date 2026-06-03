@@ -12,9 +12,7 @@ import torch
 
 from inventory_control.paper_configs import load_paper_lost_sales_config
 from inventory_control.paper_evaluation import (
-    PAPER_TEST_EVALUATION_SEED_START,
     PAPER_VALIDATION_EVALUATION_SEED_START,
-    paper_test_product_count,
 )
 from inventory_control.paper_lost_sales import evaluate_paper_lost_sales_policy, historical_demand_base_stock_policy
 from inventory_control.policies.neural.fcnn import (
@@ -42,7 +40,7 @@ def _mean_policy_reward(config, products, policy_factory, seed_start: int) -> fl
 
 
 def main() -> None:
-    """Train several FCNN configurations and save validation/test rewards."""
+    """Train several FCNN configurations and save validation rewards."""
     config = load_paper_lost_sales_config()
     runtime = config.get("runtime", {})
     generator = PaperLostSalesProductGenerator(config)
@@ -52,7 +50,6 @@ def main() -> None:
         min(int(runtime.get("fcnn_validation_products", 20)), int(runtime["fcnn_test_products"])),
         split="validation",
     )
-    test_products = generator.generate(paper_test_product_count(config), split="test")
     feature_stats = compute_paper_fcnn_feature_stats(train_products)
     max_order_factor = float(config["fcnn"].get("max_order_factor", 2.0))
     scale_action_by_history_mean = bool(config["fcnn"].get("scale_action_by_history_mean", False))
@@ -64,12 +61,6 @@ def main() -> None:
         validation_products,
         historical_demand_base_stock_policy,
         seed_start=PAPER_VALIDATION_EVALUATION_SEED_START,
-    )
-    historical_test_reward = _mean_policy_reward(
-        config,
-        test_products,
-        historical_demand_base_stock_policy,
-        seed_start=PAPER_TEST_EVALUATION_SEED_START,
     )
 
     for hidden_layers, hidden_units in sweep_configs:
@@ -121,32 +112,18 @@ def main() -> None:
             ),
             seed_start=PAPER_VALIDATION_EVALUATION_SEED_START,
         )
-        test_reward = _mean_policy_reward(
-            config,
-            test_products,
-            lambda product: PaperFCNNPolicyAdapter(
-                model,
-                product,
-                feature_stats=feature_stats,
-                max_order_factor=max_order_factor,
-                scale_action_by_history_mean=scale_action_by_history_mean,
-            ),
-            seed_start=PAPER_TEST_EVALUATION_SEED_START,
-        )
         rows.append(
             {
                 "hidden_layers": hidden_layers,
                 "hidden_units": hidden_units,
                 "best_validation_reward": result.best_validation_reward,
                 "validation_mean_total_reward": validation_reward,
-                "test_mean_total_reward": test_reward,
                 "validation_historical_mean_total_reward": historical_validation_reward,
-                "test_historical_mean_total_reward": historical_test_reward,
             }
         )
         print(
             f"hidden_layers={hidden_layers} hidden_units={hidden_units} "
-            f"validation_reward={validation_reward:.4f} test_reward={test_reward:.4f}"
+            f"validation_reward={validation_reward:.4f}"
         )
 
     output_path = Path("outputs/results/paper_lost_sales_fcnn_sweep.csv")

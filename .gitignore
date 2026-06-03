@@ -26,3 +26,6 @@ outputs/**/*.ckpt
 .ipynb_checkpoints/
 .DS_Store
 IDP_Inventory_Control/
+third_party/
+idinn-main/
+idinn-main.zip
