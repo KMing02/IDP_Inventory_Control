@@ -277,6 +277,43 @@ This writes:
 outputs/results/paper_lost_sales_monokan_sweep_validation.csv
 ```
 
+## Colab Training
+
+The local config is intentionally capped. For a larger validation run on Google Colab, use:
+
+```bash
+python -m pip install -e ".[dev]"
+python scripts/run_colab_paper_lost_sales.py
+```
+
+This uses:
+
+```text
+configs/paper_lost_sales_colab.yaml
+```
+
+The Colab runner still evaluates validation only. It does not touch the held-out test split. Useful variants:
+
+```bash
+python scripts/run_colab_paper_lost_sales.py --models monokan --skip-baselines
+python scripts/run_colab_paper_lost_sales.py --models fcnn --skip-sweeps
+```
+
+You can also run individual scripts with the Colab config:
+
+```bash
+PAPER_LOST_SALES_CONFIG=configs/paper_lost_sales_colab.yaml python scripts/train_paper_lost_sales_monokan.py
+PAPER_LOST_SALES_CONFIG=configs/paper_lost_sales_colab.yaml python scripts/evaluate_paper_lost_sales_monokan.py
+```
+
+Only after model selection is frozen, run the final held-out test once:
+
+```bash
+PAPER_LOST_SALES_CONFIG=configs/paper_lost_sales_colab.yaml python scripts/run_paper_lost_sales_baselines.py --split test --final-test
+PAPER_LOST_SALES_CONFIG=configs/paper_lost_sales_colab.yaml python scripts/evaluate_paper_lost_sales_fcnn.py --split test --final-test
+PAPER_LOST_SALES_CONFIG=configs/paper_lost_sales_colab.yaml python scripts/evaluate_paper_lost_sales_monokan.py --split test --final-test
+```
+
 Sweep stronger FCNN sizes:
 
 ```bash

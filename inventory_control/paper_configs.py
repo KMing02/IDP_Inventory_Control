@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +28,11 @@ REQUIRED_PAPER_LOST_SALES_FIELDS = {
 
 
 def load_paper_lost_sales_config(
-    path: str | Path = "configs/paper_lost_sales.yaml",
+    path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Load and validate the Maggiar-style lost-sales config."""
-    with Path(path).open("r", encoding="utf-8") as file:
+    config_path = Path(path or os.environ.get("PAPER_LOST_SALES_CONFIG", "configs/paper_lost_sales.yaml"))
+    with config_path.open("r", encoding="utf-8") as file:
         config = yaml.safe_load(file)
     validate_paper_lost_sales_config(config)
     return config

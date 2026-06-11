@@ -27,7 +27,10 @@ def main() -> None:
     generator = PaperLostSalesProductGenerator(config)
     runtime = config.get("runtime", {})
     monokan_config = config.get("monokan", {})
-    n_products = min(int(config["training_products"]), int(runtime.get("fcnn_train_products", config["training_products"])))
+    n_products = min(
+        int(config["training_products"]),
+        int(runtime.get("monokan_train_products", runtime.get("fcnn_train_products", config["training_products"]))),
+    )
     products = generator.generate(n_products, split="train")
     validation_products = generator.generate(
         min(int(runtime.get("fcnn_validation_products", 20)), int(runtime.get("fcnn_test_products", 20))),
@@ -79,12 +82,12 @@ def main() -> None:
         model,
         horizon=int(config["training_horizon_T"]),
         batch_size=min(int(config["batch_size"]), n_products),
-        epochs=min(int(config["epochs"]), int(runtime.get("fcnn_train_epochs", 50))),
-        learning_rate=float(config["learning_rate"]),
+        epochs=min(int(config["epochs"]), int(runtime.get("monokan_train_epochs", runtime.get("fcnn_train_epochs", 50)))),
+        learning_rate=float(monokan_config.get("learning_rate", config["learning_rate"])),
         seed=int(config["product_generation"]["seed"]),
-        imitation_epochs=int(config["fcnn"].get("imitation_epochs", 0)),
+        imitation_epochs=int(monokan_config.get("imitation_epochs", config["fcnn"].get("imitation_epochs", 0))),
         validation_products=validation_products,
-        validation_interval=int(config["fcnn"].get("validation_interval", 0)),
+        validation_interval=int(monokan_config.get("validation_interval", config["fcnn"].get("validation_interval", 0))),
         validation_callback=validation_callback,
         feature_stats=feature_stats,
         max_order_factor=max_order_factor,
@@ -108,6 +111,8 @@ def main() -> None:
         "feature_price_scale": feature_stats.price_scale,
         "max_order_factor": max_order_factor,
         "scale_action_by_history_mean": scale_action_by_history_mean,
+        "learning_rate": float(monokan_config.get("learning_rate", config["learning_rate"])),
+        "imitation_epochs": int(monokan_config.get("imitation_epochs", config["fcnn"].get("imitation_epochs", 0))),
         "best_validation_mean_total_reward": result.best_validation_reward,
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
