@@ -22,7 +22,7 @@ Current limitations:
 - Paper lost-sales product generation follows Table 1 of Maggiar et al. for the synthetic LS setting, and the FCNN path uses the current paper-style observable feature pipeline.
 - `OracleGammaBaseStock` is an oracle critical-quantile base-stock benchmark, not a globally optimal dynamic policy.
 - Differentiable training is validated for the FCNN path; the adapted MonoKAN module is implemented and unit-tested but has not yet been fully benchmarked.
-- MonoMLP, multi-echelon, perishability, and procurement-removal settings are not implemented yet.
+- Multi-echelon, perishability, and procurement-removal settings are not implemented yet.
 - Generated outputs and model checkpoints are intentionally ignored by Git and are not required for tests.
 
 ## Setup
@@ -353,6 +353,58 @@ outputs/results/paper_lost_sales_policy_comparison_summary_validation.csv
 outputs/results/paper_lost_sales_fcnn_worst_cases_validation.csv
 ```
 
+## IDP Monotonic Architecture Benchmark
+
+The IDP benchmark compares three policies on the same products, features, seeds,
+training budget, action cap, and inventory-state grid:
+
+- `UnconstrainedMLP`: a standard two-hidden-layer MLP.
+- `PenaltyMLP`: the same MLP initialization with a soft paired-state monotonicity penalty.
+- `MonoKAN`: a Hermite-spline architecture with nonincreasing inventory response enforced by projection.
+
+Run the deterministic compact benchmark:
+
+```bash
+python scripts/run_idp_benchmark.py --profile compact
+```
+
+Run the full validation experiment, including the penalty-weight sweep:
+
+```bash
+python scripts/run_idp_benchmark.py --profile full
+```
+
+The held-out test split remains protected:
+
+```bash
+python scripts/run_idp_benchmark.py --profile full --split test --final-test
+```
+
+Artifacts are written under `outputs/idp_benchmark/<profile>_<split>/`:
+
+```text
+summary.csv
+operational_metrics.csv
+predictions.csv
+training_log.csv
+monokan_splines.csv
+metadata.json
+models/
+```
+
+`summary.csv` combines reward and service metrics with oracle-action MAE/RMSE,
+raw and deployed monotonicity violations, parameter counts, training time, and
+the selected soft-penalty weight. Oracle actions are evaluation targets only;
+the neural policies continue to train by differentiating simulated reward.
+
+Open `notebooks/idp_monotonic_inventory_control.ipynb` for the visual analysis.
+Its default `PROFILE="auto"` loads full validation artifacts when present and
+otherwise runs and caches the compact benchmark. Execute it non-interactively:
+
+```bash
+python -m jupyter nbconvert --to notebook --execute notebooks/idp_monotonic_inventory_control.ipynb --output idp_monotonic_inventory_control_executed.ipynb --output-dir outputs
+```
+
 ## Run Original Baselines
 
 ```bash
@@ -443,7 +495,7 @@ The first neural path is a minimal zero-lead-time PyTorch setup:
 python scripts/train_zero_lead_time_mlp.py
 ```
 
-It trains an unconstrained MLP through a differentiable zero-lead-time simulator, then evaluates the trained policy on the true discrete simulator. This is only the first DirectBackprop-style smoke path; monotone MLP and MonoKAN policies are still future work.
+It trains an unconstrained MLP through a differentiable zero-lead-time simulator, then evaluates the trained policy on the true discrete simulator. The paper-style IDP benchmark above contains the soft-penalty MLP and strict MonoKAN comparison.
 
 ## Train Product-Level Lead-Time MLP
 
@@ -461,7 +513,7 @@ This is the first product-level neural generalization path. It is intentionally 
 
 ## Research Direction
 
-The benchmark is designed for later neural policy experiments inspired by recent neural inventory-control work on Deep Inventory Management, dual-sourcing neural controllers, and structure-informed DRL. The next stage is to add differentiable policy optimization and compare unconstrained and monotone neural architectures against the heuristic baselines implemented here.
+The benchmark supports differentiable policy optimization and a controlled comparison of unconstrained, soft-penalty, and architecturally monotone policies. Later extensions can apply the same comparison to lead-time, dual-sourcing, multi-echelon, and perishable settings.
 
 ## License
 

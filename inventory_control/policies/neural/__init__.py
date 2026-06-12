@@ -13,6 +13,7 @@ from inventory_control.policies.neural.monokan import (
     PaperMonoKANPolicyAdapter,
     make_paper_monokan_model,
     monokan_inventory_violation_rate,
+    sample_monokan_first_layer_splines,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "make_paper_fcnn_model",
     "make_paper_monokan_model",
     "monokan_inventory_violation_rate",
+    "sample_monokan_first_layer_splines",
 ]

@@ -8,6 +8,7 @@ from inventory_control.policies.neural.monokan import (
     PaperMonoKANPolicyAdapter,
     make_paper_monokan_model,
     monokan_inventory_violation_rate,
+    sample_monokan_first_layer_splines,
 )
 from inventory_control.products import PaperLostSalesProductGenerator
 from inventory_control.training.direct_backprop import train_paper_lost_sales_fcnn
@@ -62,3 +63,29 @@ def test_paper_monokan_adapter_matches_action_cap() -> None:
     order = adapter.act(inventory=max(product.historical_demand) + 100, t=0)
 
     assert order == 0.0
+
+
+def test_monokan_is_monotone_outside_spline_knots() -> None:
+    model = MonoKANPolicy(input_dim=37, hidden_layers=1, hidden_units=4, grid=3, monotonic_vars={0: -1})
+    fixed_features = [0.0] + [0.5] * 36
+
+    rate = monokan_inventory_violation_rate(model, fixed_features, [-5, -2, 0, 4, 8])
+
+    assert rate == 0.0
+
+
+def test_sampled_monokan_edge_matches_first_layer_evaluation() -> None:
+    model = MonoKANPolicy(input_dim=3, hidden_layers=1, hidden_units=2, grid=3, monotonic_vars={0: -1})
+    x, sampled = sample_monokan_first_layer_splines(model, feature_index=0, samples=100)
+    layer = model.layers[0]
+    inputs = torch.zeros(len(x), 3)
+    inputs[:, 0] = x
+    zero_input = torch.zeros(1, 3)
+    with torch.no_grad():
+        layer_values = layer(inputs)
+        zero_values = layer(zero_input).squeeze(0)
+    zero_index = int(torch.argmin(torch.abs(x)).item())
+    other_edge_contribution = zero_values - sampled[:, zero_index]
+    reconstructed = layer_values.T - other_edge_contribution.unsqueeze(1)
+
+    assert torch.allclose(reconstructed, sampled, atol=1e-5)

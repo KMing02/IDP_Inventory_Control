@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import copy
+import time
 
 try:
     import torch
@@ -33,6 +34,8 @@ class DirectBackpropResult:
     best_validation_reward: float | None = None
     best_state_dict: dict[str, torch.Tensor] | None = None
     training_log: list[dict[str, float | int]] | None = None
+    monotonicity_penalties: list[float] | None = None
+    elapsed_seconds: float = 0.0
 
     @property
     def losses(self) -> list[float]:
@@ -125,6 +128,67 @@ def paper_lost_sales_fcnn_order(
     return torch.minimum(order, order_cap)
 
 
+def paper_lost_sales_features(
+    batch: dict[str, torch.Tensor],
+    inventory: torch.Tensor,
+) -> torch.Tensor:
+    """Build the normalized model inputs for an inventory vector."""
+    demand_scale = torch.clamp(batch["feature_demand_scale"], min=1.0)
+    price_scale = torch.clamp(batch["feature_price_scale"], min=1.0)
+    economics = torch.stack(
+        [
+            batch["price"] / price_scale,
+            batch["purchase_cost"] / price_scale,
+            batch["holding_cost"] / price_scale,
+            batch["lost_sale_penalty"] / price_scale,
+        ],
+        dim=1,
+    )
+    return torch.cat([(inventory / demand_scale).unsqueeze(-1), batch["history"], economics], dim=1)
+
+
+def paper_inventory_monotonicity_penalty(
+    model: nn.Module,
+    batch: dict[str, torch.Tensor],
+    generator: torch.Generator,
+    samples_per_product: int = 1,
+    max_inventory_factor: float = 4.0,
+    scale_action_by_history_mean: bool = False,
+) -> torch.Tensor:
+    """Penalize raw order increases between paired low/high inventory states."""
+    if samples_per_product <= 0:
+        return torch.zeros((), dtype=batch["initial_inventory"].dtype)
+    batch_size = batch["initial_inventory"].shape[0]
+    max_inventory = float(max_inventory_factor) * torch.clamp(batch["historical_mean_demand"], min=1.0)
+    penalties = []
+    for _ in range(samples_per_product):
+        first = torch.rand(batch_size, generator=generator)
+        second = torch.rand(batch_size, generator=generator)
+        inventory_low = torch.minimum(first, second) * max_inventory
+        inventory_high = torch.maximum(first, second) * max_inventory
+        low_order = model(paper_lost_sales_features(batch, inventory_low))
+        high_order = model(paper_lost_sales_features(batch, inventory_high))
+        if scale_action_by_history_mean:
+            action_scale = torch.clamp(batch["historical_mean_demand"], min=1.0)
+            low_order = low_order * action_scale
+            high_order = high_order * action_scale
+        penalties.append(torch.mean(torch.relu(high_order - low_order) ** 2))
+    return torch.stack(penalties).mean()
+
+
+def paper_reward_normalization_scale(
+    batch: dict[str, torch.Tensor],
+    horizon: int,
+) -> torch.Tensor:
+    """Return a detached positive scale for comparable reward gradients."""
+    per_product_scale = (
+        torch.clamp(batch["price"], min=1.0)
+        * torch.clamp(batch["historical_mean_demand"], min=1.0)
+        * max(int(horizon), 1)
+    )
+    return torch.clamp(per_product_scale.mean(), min=1.0).detach()
+
+
 def paper_lost_sales_fcnn_rollout(
     model: nn.Module,
     batch: dict[str, torch.Tensor],
@@ -203,19 +267,25 @@ def train_paper_lost_sales_fcnn(
     feature_stats: PaperFCNNFeatureStats | None = None,
     max_order_factor: float = PAPER_FCNN_MAX_ORDER_FACTOR,
     scale_action_by_history_mean: bool = False,
+    normalize_reward_loss: bool = False,
+    monotonicity_penalty_weight: float = 0.0,
+    monotonicity_samples_per_product: int = 1,
 ) -> DirectBackpropResult:
     """Train FCNN with DirectBackprop-style negative reward minimization."""
     torch.manual_seed(seed)
     generator = torch.Generator().manual_seed(seed)
+    penalty_generator = torch.Generator().manual_seed(seed + 1_000_003)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     training_losses: list[float] = []
     mean_total_rewards: list[float] = []
     validation_rewards: list[float] = []
     validation_epochs: list[int] = []
     training_log: list[dict[str, float | int]] = []
+    monotonicity_penalties: list[float] = []
     best_validation_reward: float | None = None
     best_state_dict: dict[str, torch.Tensor] | None = None
     total_epochs = imitation_epochs + epochs
+    start_time = time.perf_counter()
     for epoch in range(total_epochs):
         indices = torch.randint(0, len(products), (batch_size,), generator=generator).tolist()
         batch_products = [products[index] for index in indices]
@@ -227,7 +297,7 @@ def train_paper_lost_sales_fcnn(
                 max_order_factor=max_order_factor,
                 scale_action_by_history_mean=scale_action_by_history_mean,
             ).mean()
-            loss = historical_base_stock_imitation_loss(
+            primary_loss = historical_base_stock_imitation_loss(
                 model,
                 batch,
                 generator,
@@ -241,7 +311,21 @@ def train_paper_lost_sales_fcnn(
                 max_order_factor=max_order_factor,
                 scale_action_by_history_mean=scale_action_by_history_mean,
             ).mean()
-            loss = -mean_total_reward
+            primary_loss = -mean_total_reward
+            if normalize_reward_loss:
+                primary_loss = primary_loss / paper_reward_normalization_scale(batch, horizon)
+        if monotonicity_penalty_weight > 0:
+            monotonicity_penalty = paper_inventory_monotonicity_penalty(
+                model,
+                batch,
+                penalty_generator,
+                samples_per_product=monotonicity_samples_per_product,
+                max_inventory_factor=max_order_factor,
+                scale_action_by_history_mean=scale_action_by_history_mean,
+            )
+        else:
+            monotonicity_penalty = torch.zeros((), dtype=primary_loss.dtype, device=primary_loss.device)
+        loss = primary_loss + float(monotonicity_penalty_weight) * monotonicity_penalty
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -249,6 +333,17 @@ def train_paper_lost_sales_fcnn(
             model.apply_monotonic_constraints()
         training_losses.append(float(loss.detach().item()))
         mean_total_rewards.append(float(mean_total_reward.detach().item()))
+        monotonicity_penalties.append(float(monotonicity_penalty.detach().item()))
+        log_row: dict[str, float | int] = {
+            "epoch": epoch + 1,
+            "phase": 0 if epoch < imitation_epochs else 1,
+            "training_loss": float(loss.detach().item()),
+            "primary_loss": float(primary_loss.detach().item()),
+            "training_mean_total_reward": float(mean_total_reward.detach().item()),
+            "monotonicity_penalty": float(monotonicity_penalty.detach().item()),
+            "monotonicity_penalty_weight": float(monotonicity_penalty_weight),
+            "elapsed_seconds": float(time.perf_counter() - start_time),
+        }
         if validation_products and validation_interval and (epoch + 1) % validation_interval == 0:
             if validation_callback is not None:
                 validation_reward = validation_callback(epoch + 1, model)
@@ -269,17 +364,12 @@ def train_paper_lost_sales_fcnn(
                 validation_reward = float(validation_reward_tensor.item())
             validation_rewards.append(float(validation_reward))
             validation_epochs.append(epoch + 1)
-            training_log.append(
-                {
-                    "epoch": epoch + 1,
-                    "training_loss": float(loss.detach().item()),
-                    "training_mean_total_reward": float(mean_total_reward.detach().item()),
-                    "validation_mean_total_reward": float(validation_reward),
-                }
-            )
+            log_row["validation_mean_total_reward"] = float(validation_reward)
             if best_validation_reward is None or validation_reward > best_validation_reward:
                 best_validation_reward = float(validation_reward)
                 best_state_dict = copy.deepcopy(model.state_dict())
+        training_log.append(log_row)
+    elapsed_seconds = float(time.perf_counter() - start_time)
     return DirectBackpropResult(
         model=model,
         training_losses=training_losses,
@@ -288,5 +378,7 @@ def train_paper_lost_sales_fcnn(
         validation_epochs=validation_epochs or None,
         best_validation_reward=best_validation_reward,
         best_state_dict=best_state_dict,
-        training_log=training_log or None,
+        training_log=training_log,
+        monotonicity_penalties=monotonicity_penalties,
+        elapsed_seconds=elapsed_seconds,
     )

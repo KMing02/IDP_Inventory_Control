@@ -10,8 +10,10 @@ from inventory_control.policies.neural.fcnn import (
 )
 from inventory_control.training.direct_backprop import (
     make_paper_lost_sales_training_batch,
+    paper_inventory_monotonicity_penalty,
     paper_lost_sales_fcnn_order,
     paper_lost_sales_fcnn_rollout,
+    paper_reward_normalization_scale,
     train_paper_lost_sales_fcnn,
 )
 from inventory_control.products import PaperLostSalesProductGenerator
@@ -170,3 +172,119 @@ def test_train_paper_lost_sales_fcnn_tracks_best_validation_checkpoint() -> None
     assert result.best_state_dict is not None
     assert result.training_log is not None
     assert result.training_log[-1]["validation_mean_total_reward"] == 2.0
+
+
+def test_inventory_monotonicity_penalty_has_gradient_for_increasing_policy() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(2, "train")
+    batch = make_paper_lost_sales_training_batch(
+        products,
+        horizon=2,
+        generator=torch.Generator().manual_seed(0),
+    )
+    model = torch.nn.Sequential(torch.nn.Linear(37, 1, bias=False), torch.nn.Flatten(start_dim=0))
+    with torch.no_grad():
+        model[0].weight.zero_()
+        model[0].weight[0, 0] = 1.0
+
+    penalty = paper_inventory_monotonicity_penalty(
+        model,
+        batch,
+        torch.Generator().manual_seed(1),
+        samples_per_product=2,
+    )
+    penalty.backward()
+
+    assert penalty.item() > 0
+    assert model[0].weight.grad is not None
+    assert model[0].weight.grad[0, 0].item() > 0
+
+
+def test_inventory_monotonicity_penalty_is_zero_for_decreasing_policy() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(2, "train")
+    batch = make_paper_lost_sales_training_batch(
+        products,
+        horizon=2,
+        generator=torch.Generator().manual_seed(0),
+    )
+    model = torch.nn.Sequential(torch.nn.Linear(37, 1, bias=False), torch.nn.Flatten(start_dim=0))
+    with torch.no_grad():
+        model[0].weight.zero_()
+        model[0].weight[0, 0] = -1.0
+
+    penalty = paper_inventory_monotonicity_penalty(
+        model,
+        batch,
+        torch.Generator().manual_seed(1),
+        samples_per_product=2,
+    )
+
+    assert penalty.item() == 0.0
+
+
+def test_reward_normalization_scale_uses_price_demand_and_horizon() -> None:
+    batch = {
+        "price": torch.tensor([10.0, 20.0]),
+        "historical_mean_demand": torch.tensor([2.0, 4.0]),
+    }
+
+    scale = paper_reward_normalization_scale(batch, horizon=5)
+
+    assert scale.item() == pytest.approx((10 * 2 * 5 + 20 * 4 * 5) / 2)
+
+
+def test_normalized_reward_training_loss_uses_reported_scale() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(4, "train")
+    model = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
+    generator = torch.Generator().manual_seed(3)
+    indices = torch.randint(0, len(products), (2,), generator=generator).tolist()
+    expected_batch = make_paper_lost_sales_training_batch(
+        [products[index] for index in indices],
+        horizon=3,
+        generator=generator,
+    )
+    expected_scale = paper_reward_normalization_scale(expected_batch, horizon=3).item()
+
+    result = train_paper_lost_sales_fcnn(
+        products,
+        model,
+        horizon=3,
+        batch_size=2,
+        epochs=1,
+        learning_rate=1e-3,
+        seed=3,
+        normalize_reward_loss=True,
+    )
+
+    assert result.training_losses[0] == pytest.approx(-result.mean_total_rewards[0] / expected_scale)
+
+
+def test_disabled_penalty_preserves_training_behavior() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(4, "train")
+    first = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
+    second = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
+    second.load_state_dict(first.state_dict())
+
+    first_result = train_paper_lost_sales_fcnn(
+        products,
+        first,
+        horizon=3,
+        batch_size=2,
+        epochs=1,
+        learning_rate=1e-3,
+        seed=7,
+    )
+    second_result = train_paper_lost_sales_fcnn(
+        products,
+        second,
+        horizon=3,
+        batch_size=2,
+        epochs=1,
+        learning_rate=1e-3,
+        seed=7,
+        monotonicity_penalty_weight=0.0,
+        normalize_reward_loss=False,
+    )
+
+    assert first_result.training_losses == second_result.training_losses
+    for first_parameter, second_parameter in zip(first.parameters(), second.parameters()):
+        assert torch.equal(first_parameter, second_parameter)

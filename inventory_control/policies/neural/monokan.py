@@ -294,3 +294,38 @@ def monokan_inventory_violation_rate(
         return 0.0
     violations = orders[1:] > orders[:-1] + 1e-6
     return float(violations.float().mean().item())
+
+
+def sample_monokan_first_layer_splines(
+    model: MonoKANPolicy,
+    feature_index: int = 0,
+    samples: int = 100,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample first-layer edge functions for one input feature.
+
+    Returns a common x-grid and one row per hidden/output unit. Values include
+    both the base and spline terms for the selected edge, but not layer bias.
+    """
+    if not model.layers:
+        raise ValueError("MonoKAN model has no layers")
+    layer = model.layers[0]
+    if feature_index < 0 or feature_index >= layer.in_dim:
+        raise ValueError(f"feature_index must be in [0, {layer.in_dim})")
+    if samples < 2:
+        raise ValueError("samples must be at least 2")
+    edge_indices = torch.arange(layer.out_dim, device=layer.grid.device) * layer.in_dim + feature_index
+    selected_grid = layer.grid[edge_indices]
+    x = torch.linspace(
+        float(selected_grid[:, 0].min().item()),
+        float(selected_grid[:, -1].max().item()),
+        steps=samples,
+        device=layer.grid.device,
+    )
+    x_eval = x.repeat(layer.out_dim, 1)
+    spline_values = _evaluate_hermite_curves(x_eval, selected_grid, layer.coef[edge_indices])
+    base_values = _positive_elu(x_eval)
+    values = (
+        layer.scale_base[edge_indices].unsqueeze(1) * base_values
+        + layer.scale_spline[edge_indices].unsqueeze(1) * spline_values
+    )
+    return x.detach().cpu(), values.detach().cpu()

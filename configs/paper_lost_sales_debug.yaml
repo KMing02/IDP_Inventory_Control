@@ -34,6 +34,43 @@ monokan:
   scale_action_by_history_mean: true
   max_order_factor: 2.0
 
+idp_benchmark:
+  seed: 2025
+  hidden_layers: 1
+  hidden_units: 4
+  activation: ELU
+  max_order_factor: 4.0
+  scale_action_by_history_mean: true
+  normalize_reward_loss: true
+  monotonicity_samples_per_product: 1
+  penalty_weights: [0.1, 1.0, 10.0]
+  raw_violation_threshold: 0.01
+  compact:
+    training_products: 4
+    validation_products: 2
+    batch_size: 2
+    training_horizon: 3
+    imitation_epochs: 1
+    reward_epochs: 1
+    validation_interval: 1
+    evaluation_horizon: 5
+    burn_in: 0
+    inventory_states: 5
+    oracle_mc_samples: 100
+    penalty_weights: [10.0]
+  full:
+    training_products: 8
+    validation_products: 2
+    batch_size: 4
+    training_horizon: 8
+    imitation_epochs: 1
+    reward_epochs: 2
+    validation_interval: 1
+    evaluation_horizon: 12
+    burn_in: 2
+    inventory_states: 10
+    oracle_mc_samples: 200
+
 demand_distribution: Gamma
 
 product_features:
