@@ -13,12 +13,26 @@ except ImportError as exc:  # pragma: no cover
 
 from torch import nn
 
-from inventory_control.policies.neural.fcnn import FCNNPolicy, PaperFCNNFeatureStats
+from inventory_control.policies.neural.fcnn import FCNNPolicy, PaperFCNNFeatureStats, infer_model_device
 from inventory_control.paper_lost_sales import historical_demand_base_stock_policy
 from inventory_control.products import PaperLostSalesProduct
 
 
 PAPER_FCNN_MAX_ORDER_FACTOR = 2.0
+
+
+def default_torch_device() -> torch.device:
+    """Pick the best available device for neural training."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def move_batch_to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
+    """Move a tensor batch to the chosen device."""
+    return {key: value.to(device) for key, value in batch.items()}
 
 
 @dataclass
@@ -173,7 +187,8 @@ def historical_base_stock_imitation_loss(
     max_inventory_level = float(max_order_factor) * torch.clamp(batch["historical_mean_demand"], min=1.0)
     repeated_losses = []
     for _ in range(samples_per_product):
-        random_fraction = torch.rand(batch_size, generator=generator)
+        random_fraction = torch.rand(batch_size, generator=generator, dtype=batch["initial_inventory"].dtype)
+        random_fraction = random_fraction.to(batch["initial_inventory"].device)
         inventory = random_fraction * max_inventory_level
         predicted = paper_lost_sales_fcnn_order(
             model,
@@ -203,10 +218,13 @@ def train_paper_lost_sales_fcnn(
     feature_stats: PaperFCNNFeatureStats | None = None,
     max_order_factor: float = PAPER_FCNN_MAX_ORDER_FACTOR,
     scale_action_by_history_mean: bool = False,
+    device: torch.device | str | None = None,
 ) -> DirectBackpropResult:
     """Train FCNN with DirectBackprop-style negative reward minimization."""
     torch.manual_seed(seed)
     generator = torch.Generator().manual_seed(seed)
+    chosen_device = torch.device(device) if device is not None else default_torch_device()
+    model = model.to(chosen_device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     training_losses: list[float] = []
     mean_total_rewards: list[float] = []
@@ -219,7 +237,10 @@ def train_paper_lost_sales_fcnn(
     for epoch in range(total_epochs):
         indices = torch.randint(0, len(products), (batch_size,), generator=generator).tolist()
         batch_products = [products[index] for index in indices]
-        batch = make_paper_lost_sales_training_batch(batch_products, horizon, generator, feature_stats=feature_stats)
+        batch = move_batch_to_device(
+            make_paper_lost_sales_training_batch(batch_products, horizon, generator, feature_stats=feature_stats),
+            infer_model_device(model),
+        )
         if epoch < imitation_epochs:
             mean_total_reward = paper_lost_sales_fcnn_rollout(
                 model,
@@ -259,6 +280,7 @@ def train_paper_lost_sales_fcnn(
                     generator,
                     feature_stats=feature_stats,
                 )
+                validation_batch = move_batch_to_device(validation_batch, infer_model_device(model))
                 with torch.no_grad():
                     validation_reward_tensor = paper_lost_sales_fcnn_rollout(
                         model,

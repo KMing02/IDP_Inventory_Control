@@ -33,6 +33,14 @@ def compute_paper_fcnn_feature_stats(products: Sequence[PaperLostSalesProduct]) 
     return PaperFCNNFeatureStats(demand_scale=demand_scale, price_scale=price_scale)
 
 
+def infer_model_device(model: nn.Module) -> torch.device:
+    """Return the device that should be used for model inputs."""
+    try:
+        return next(model.parameters()).device
+    except StopIteration:  # pragma: no cover
+        return torch.device("cpu")
+
+
 class FCNNPolicy(nn.Module):
     """FCNN mapping observable features to non-negative order quantity."""
 
@@ -207,6 +215,7 @@ class PaperFCNNPolicyAdapter:
                 )
             ],
             dtype=torch.float32,
+            device=infer_model_device(self.model),
         )
         self.model.eval()
         with torch.no_grad():

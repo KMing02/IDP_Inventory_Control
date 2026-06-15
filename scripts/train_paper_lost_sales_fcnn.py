@@ -27,7 +27,7 @@ from torch import nn
 from inventory_control.policies.neural.fcnn import compute_paper_fcnn_feature_stats, make_paper_fcnn_model
 from inventory_control.policies.neural.fcnn import PaperFCNNPolicyAdapter
 from inventory_control.products import PaperLostSalesProductGenerator
-from inventory_control.training.direct_backprop import train_paper_lost_sales_fcnn
+from inventory_control.training.direct_backprop import default_torch_device, train_paper_lost_sales_fcnn
 
 
 def main() -> None:
@@ -44,8 +44,9 @@ def main() -> None:
     feature_stats = compute_paper_fcnn_feature_stats(products)
     max_order_factor = float(config["fcnn"].get("max_order_factor", 2.0))
     scale_action_by_history_mean = bool(config["fcnn"].get("scale_action_by_history_mean", False))
+    device = default_torch_device()
     torch.manual_seed(int(config["product_generation"]["seed"]))
-    model = make_paper_fcnn_model(config)
+    model = make_paper_fcnn_model(config).to(device)
     baseline_rewards = [
         evaluate_paper_lost_sales_policy(
             product,
@@ -94,6 +95,7 @@ def main() -> None:
         feature_stats=feature_stats,
         max_order_factor=max_order_factor,
         scale_action_by_history_mean=scale_action_by_history_mean,
+        device=device,
     )
     if result.best_state_dict is not None:
         model.load_state_dict(result.best_state_dict)
@@ -139,6 +141,7 @@ def main() -> None:
     print(f"final_training_loss={result.training_losses[-1]:.4f}")
     print(f"initial_mean_total_reward={result.mean_total_rewards[0]:.4f}")
     print(f"final_mean_total_reward={result.mean_total_rewards[-1]:.4f}")
+    print(f"device={device}")
     if result.best_validation_reward is not None:
         print(f"best_validation_mean_total_reward={result.best_validation_reward:.4f}")
     if result.validation_rewards:

@@ -24,9 +24,11 @@ from inventory_control.policies.neural.fcnn import (
     PaperFCNNFeatureStats,
     PaperFCNNPolicyAdapter,
     compute_paper_fcnn_feature_stats,
+    infer_model_device,
     make_paper_fcnn_model,
 )
 from inventory_control.products import PaperLostSalesProductGenerator
+from inventory_control.training.direct_backprop import default_torch_device
 
 
 def main() -> None:
@@ -41,8 +43,9 @@ def main() -> None:
     model_path = Path("outputs/models/paper_lost_sales_fcnn.pt")
     metadata_path = Path("outputs/models/paper_lost_sales_fcnn_metadata.json")
     metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
-    model = make_paper_fcnn_model(config, metadata=metadata)
-    model.load_state_dict(torch.load(model_path, weights_only=True))
+    device = default_torch_device()
+    model = make_paper_fcnn_model(config, metadata=metadata).to(device)
+    model.load_state_dict(torch.load(model_path, weights_only=True, map_location=device))
     generator = PaperLostSalesProductGenerator(config)
     n_training_products = min(int(config["training_products"]), int(config["runtime"]["fcnn_train_products"]))
     training_products = generator.generate(n_training_products, split="train")
@@ -118,6 +121,7 @@ def main() -> None:
         "mean_lost_sales_penalty",
     ]
     print(results[diagnostic_columns].mean().to_string())
+    print(f"device={infer_model_device(model)}")
 
 
 if __name__ == "__main__":

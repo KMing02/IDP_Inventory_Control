@@ -19,6 +19,8 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise ImportError("Install neural dependencies with `python -m pip install -e '.[dev]'`.") from exc
 
+from inventory_control.policies.neural.fcnn import infer_model_device
+
 
 def _positive_elu(x: torch.Tensor) -> torch.Tensor:
     """Positive increasing base function used by MonoKAN-style layers."""
@@ -254,6 +256,7 @@ class PaperMonoKANPolicyAdapter:
                 )
             ],
             dtype=torch.float32,
+            device=infer_model_device(self.model),
         )
         self.model.eval()
         with torch.no_grad():
@@ -285,8 +288,9 @@ def monokan_inventory_violation_rate(
     inventory_values: Sequence[float],
 ) -> float:
     """Return fraction of adjacent inventory pairs violating nonincreasing orders."""
-    features = torch.tensor([list(fixed_features) for _ in inventory_values], dtype=torch.float32)
-    features[:, 0] = torch.tensor(list(inventory_values), dtype=torch.float32)
+    device = infer_model_device(model)
+    features = torch.tensor([list(fixed_features) for _ in inventory_values], dtype=torch.float32, device=device)
+    features[:, 0] = torch.tensor(list(inventory_values), dtype=torch.float32, device=device)
     model.eval()
     with torch.no_grad():
         orders = model(features)
