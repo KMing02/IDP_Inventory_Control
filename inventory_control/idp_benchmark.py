@@ -11,6 +11,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 try:
     import torch
     from torch import nn
@@ -23,7 +28,8 @@ from inventory_control.paper_lost_sales import (
     BaseStockOrderPolicy,
     evaluate_paper_lost_sales_policy,
     historical_demand_base_stock_policy,
-    oracle_gamma_base_stock_policy,
+    non_omniscient_gamma_base_stock_policy,
+    omniscient_gamma_base_stock_policy,
 )
 from inventory_control.policies.neural.fcnn import (
     PaperFCNNFeatureStats,
@@ -40,11 +46,12 @@ from inventory_control.training.direct_backprop import DirectBackpropResult, tra
 
 
 POLICY_ORDER = [
-    "HistoricalDemandBaseStock",
-    "OracleGammaBaseStock",
-    "UnconstrainedMLP",
-    "PenaltyMLP",
+    "PaperFCNN",
     "MonoKAN",
+    "PenaltyMLP",
+    "NonOmniscientOptimal",
+    "OmniscientOptimal",
+    "HistoricalDemandBaseStock",
 ]
 
 
@@ -58,6 +65,7 @@ class IDPBenchmarkArtifacts:
     predictions: pd.DataFrame
     training_log: pd.DataFrame
     spline_values: pd.DataFrame
+    sample_efficiency: pd.DataFrame | None = None
 
 
 class _TorchPaperPolicyAdapter:
@@ -94,14 +102,14 @@ class _TorchPaperPolicyAdapter:
 
 
 def _profile_settings(config: dict[str, Any], profile: str) -> dict[str, Any]:
-    if profile not in {"compact", "full"}:
-        raise ValueError("profile must be 'compact' or 'full'")
+    if profile not in {"compact", "full", "paper_replication"}:
+        raise ValueError("profile must be 'compact', 'full', or 'paper_replication'")
     benchmark = config.get("idp_benchmark")
     if benchmark is None:
         raise ValueError("paper lost-sales config is missing idp_benchmark settings")
     settings = {**benchmark, **benchmark[profile]}
     settings["profile"] = profile
-    if profile == "compact":
+    if profile in {"compact", "paper_replication"}:
         settings["penalty_weights"] = benchmark[profile].get("penalty_weights", [1.0])
     return settings
 
@@ -112,10 +120,12 @@ def _model_config(config: dict[str, Any], settings: dict[str, Any]) -> dict[str,
         **config,
         "fcnn": {
             **config["fcnn"],
-            "history_encoder": "flat",
-            "hidden_layers": int(settings["hidden_layers"]),
-            "hidden_units": int(settings["hidden_units"]),
-            "activation": str(settings["activation"]),
+            "history_encoder": "causal_cnn",
+            "hidden_layers": int(config["fcnn"]["hidden_layers"]),
+            "hidden_units": int(config["fcnn"]["hidden_units"]),
+            "cnn_channels": int(config["fcnn"].get("cnn_channels", 8)),
+            "cnn_dilations": list(config["fcnn"].get("cnn_dilations", [1, 2, 4, 8, 16])),
+            "activation": str(config["fcnn"]["activation"]),
         },
         "monokan": {
             **config.get("monokan", {}),
@@ -242,13 +252,10 @@ def _oracle_levels(
     oracle_mc_samples: int,
     seed: int,
 ) -> dict[str, float]:
+    del oracle_mc_samples, seed
     return {
-        product.product_id: oracle_gamma_base_stock_policy(
-            product,
-            n_samples=oracle_mc_samples,
-            seed=seed + index,
-        ).S
-        for index, product in enumerate(products)
+        product.product_id: omniscient_gamma_base_stock_policy(product).S
+        for product in products
     }
 
 
@@ -268,13 +275,21 @@ def _prediction_table(
             np.maximum(float(oracle_levels[product.product_id]) - inventories, 0.0),
             np.maximum(max_inventory - inventories, 0.0),
         )
-        historical_level = historical_demand_base_stock_policy(product).S
+        non_omniscient_level = non_omniscient_gamma_base_stock_policy(product).S
+        empirical_level = historical_demand_base_stock_policy(product).S
         policy_orders: dict[str, tuple[np.ndarray, np.ndarray]] = {
-            "OracleGammaBaseStock": (oracle_order, oracle_order),
-            "HistoricalDemandBaseStock": (
-                np.maximum(float(historical_level) - inventories, 0.0),
+            "OmniscientOptimal": (oracle_order, oracle_order),
+            "NonOmniscientOptimal": (
+                np.maximum(float(non_omniscient_level) - inventories, 0.0),
                 np.minimum(
-                    np.maximum(float(historical_level) - inventories, 0.0),
+                    np.maximum(float(non_omniscient_level) - inventories, 0.0),
+                    np.maximum(max_inventory - inventories, 0.0),
+                ),
+            ),
+            "HistoricalDemandBaseStock": (
+                np.maximum(float(empirical_level) - inventories, 0.0),
+                np.minimum(
+                    np.maximum(float(empirical_level) - inventories, 0.0),
                     np.maximum(max_inventory - inventories, 0.0),
                 ),
             ),
@@ -304,6 +319,9 @@ def _prediction_table(
                         "raw_order": float(raw_orders[state_index]),
                         "deployed_order": deployed,
                         "error": deployed - target,
+                        "order_up_to_level": float(deployed + inventory),
+                        "omniscient_order_up_to_level": float(oracle_levels[product.product_id]),
+                        "true_coefficient_of_variation": float(product.true_coefficient_of_variation),
                     }
                 )
     return pd.DataFrame(rows)
@@ -326,13 +344,31 @@ def _prediction_summary(predictions: pd.DataFrame) -> pd.DataFrame:
                 "policy_name": policy_name,
                 "mae": float(np.mean(np.abs(errors))),
                 "rmse": float(np.sqrt(np.mean(errors**2))),
+                "order_up_to_mae": float(np.mean(np.abs(errors))),
+                "order_up_to_rmse": float(np.sqrt(np.mean(errors**2))),
                 "raw_violation_rate": float(np.mean(raw_increases > 1e-6)),
                 "deployed_violation_rate": float(np.mean(deployed_increases > 1e-6)),
                 "raw_max_violation": float(raw_increases.max(initial=0.0)),
                 "deployed_max_violation": float(deployed_increases.max(initial=0.0)),
+                "mean_slope_deviation_from_minus_one": _mean_slope_deviation(policy_rows),
             }
         )
     return pd.DataFrame(rows)
+
+
+def _mean_slope_deviation(policy_rows: pd.DataFrame) -> float:
+    deviations: list[float] = []
+    for _, product_rows in policy_rows.groupby("product_id", sort=False):
+        ordered = product_rows.sort_values("state_index")
+        inventory = ordered["inventory"].to_numpy(dtype=float)
+        orders = ordered["deployed_order"].to_numpy(dtype=float)
+        if len(inventory) < 2:
+            continue
+        slopes = np.diff(orders) / np.maximum(np.diff(inventory), 1e-12)
+        active = orders[:-1] > 1e-6
+        if np.any(active):
+            deviations.extend(np.abs(slopes[active] + 1.0).tolist())
+    return float(np.mean(deviations)) if deviations else 0.0
 
 
 def _operational_table(
@@ -347,11 +383,12 @@ def _operational_table(
     seed_start = paper_evaluation_seed_start(split)
     for index, product in enumerate(products):
         policies = [
-            historical_demand_base_stock_policy(product),
+            non_omniscient_gamma_base_stock_policy(product),
             BaseStockOrderPolicy(
                 S=float(oracle_levels[product.product_id]),
-                name="OracleGammaBaseStock",
+                name="OmniscientOptimal",
             ),
+            historical_demand_base_stock_policy(product),
         ]
         policies.extend(
             _TorchPaperPolicyAdapter(
@@ -405,16 +442,19 @@ def _parameter_count(model: nn.Module) -> int:
 def run_idp_benchmark(
     config_path: str | Path | None = None,
     profile: str = "compact",
+    mode: str = "structure-ls",
     split: str = "validation",
     final_test: bool = False,
     output_dir: str | Path | None = None,
 ) -> IDPBenchmarkArtifacts:
     """Train, evaluate, and save the unified IDP benchmark."""
     require_final_test_confirmation(split, final_test)
+    if mode not in {"replicate-ls", "structure-ls", "sample-efficiency"}:
+        raise ValueError("mode must be 'replicate-ls', 'structure-ls', or 'sample-efficiency'")
     config = load_paper_lost_sales_config(config_path)
     settings = _profile_settings(config, profile)
     model_config = _model_config(config, settings)
-    destination = Path(output_dir or f"outputs/idp_benchmark/{profile}_{split}")
+    destination = Path(output_dir or f"outputs/idp_benchmark/{mode}_{profile}_{split}")
 
     generator = PaperLostSalesProductGenerator(config)
     train_products = generator.generate(int(settings["training_products"]), split="train")
@@ -422,16 +462,16 @@ def run_idp_benchmark(
     feature_stats = compute_paper_fcnn_feature_stats(train_products)
 
     torch.manual_seed(int(settings["seed"]))
-    unconstrained = make_paper_fcnn_model(model_config)
-    shared_initial_state = copy.deepcopy(unconstrained.state_dict())
-    unconstrained_result = _train_model(
+    paper_fcnn = make_paper_fcnn_model(model_config)
+    shared_initial_state = copy.deepcopy(paper_fcnn.state_dict())
+    paper_fcnn_result = _train_model(
         config,
         settings,
         train_products,
         evaluation_products,
         feature_stats,
-        unconstrained,
-        "UnconstrainedMLP",
+        paper_fcnn,
+        "PaperFCNN",
         split,
     )
 
@@ -440,75 +480,85 @@ def run_idp_benchmark(
         int(settings["oracle_mc_samples"]),
         int(settings["seed"]) + 10_000,
     )
+    models: dict[str, nn.Module] = {"PaperFCNN": paper_fcnn}
     penalty_candidates: list[dict[str, Any]] = []
     penalty_logs: list[pd.DataFrame] = []
-    for weight in settings["penalty_weights"]:
-        penalty_model = make_paper_fcnn_model(model_config)
-        penalty_model.load_state_dict(shared_initial_state)
-        result = _train_model(
+    selected_penalty: dict[str, Any] | None = None
+    monokan_result: DirectBackpropResult | None = None
+    monokan: nn.Module | None = None
+    sample_efficiency = pd.DataFrame()
+    if mode == "sample-efficiency":
+        sample_efficiency = _run_sample_efficiency(
+            config,
+            settings,
+            model_config,
+            split,
+            destination,
+        )
+    if mode == "structure-ls":
+        for weight in settings["penalty_weights"]:
+            penalty_model = make_paper_fcnn_model(model_config)
+            penalty_model.load_state_dict(shared_initial_state)
+            result = _train_model(
+                config,
+                settings,
+                train_products,
+                evaluation_products,
+                feature_stats,
+                penalty_model,
+                f"PenaltyMLP(lambda={float(weight):g})",
+                split,
+                penalty_weight=float(weight),
+            )
+            candidate_predictions = _prediction_table(
+                evaluation_products,
+                {"PenaltyMLP": penalty_model},
+                feature_stats,
+                settings,
+                oracle_levels,
+            )
+            diagnostics = _prediction_summary(candidate_predictions)
+            penalty_diagnostics = diagnostics.loc[diagnostics["policy_name"] == "PenaltyMLP"].iloc[0]
+            validation_reward = _mean_validation_reward(
+                config,
+                settings,
+                evaluation_products,
+                penalty_model,
+                "PenaltyMLP",
+                feature_stats,
+                split,
+            )
+            penalty_candidates.append(
+                {
+                    "weight": float(weight),
+                    "model": penalty_model,
+                    "result": result,
+                    "validation_reward": validation_reward,
+                    "raw_violation_rate": float(penalty_diagnostics["raw_violation_rate"]),
+                }
+            )
+            candidate_log = pd.DataFrame(result.training_log or [])
+            candidate_log["policy_name"] = f"PenaltyMLP(lambda={float(weight):g})"
+            candidate_log["penalty_weight"] = float(weight)
+            penalty_logs.append(candidate_log)
+        selected_penalty = _select_penalty_candidate(
+            penalty_candidates,
+            float(settings["raw_violation_threshold"]),
+        )
+        torch.manual_seed(int(settings["seed"]))
+        monokan = make_paper_monokan_model(model_config)
+        monokan_result = _train_model(
             config,
             settings,
             train_products,
             evaluation_products,
             feature_stats,
-            penalty_model,
-            f"PenaltyMLP(lambda={float(weight):g})",
-            split,
-            penalty_weight=float(weight),
-        )
-        candidate_predictions = _prediction_table(
-            evaluation_products,
-            {"PenaltyMLP": penalty_model},
-            feature_stats,
-            settings,
-            oracle_levels,
-        )
-        diagnostics = _prediction_summary(candidate_predictions)
-        penalty_diagnostics = diagnostics.loc[diagnostics["policy_name"] == "PenaltyMLP"].iloc[0]
-        validation_reward = _mean_validation_reward(
-            config,
-            settings,
-            evaluation_products,
-            penalty_model,
-            "PenaltyMLP",
-            feature_stats,
+            monokan,
+            "MonoKAN",
             split,
         )
-        penalty_candidates.append(
-            {
-                "weight": float(weight),
-                "model": penalty_model,
-                "result": result,
-                "validation_reward": validation_reward,
-                "raw_violation_rate": float(penalty_diagnostics["raw_violation_rate"]),
-            }
-        )
-        candidate_log = pd.DataFrame(result.training_log or [])
-        candidate_log["policy_name"] = f"PenaltyMLP(lambda={float(weight):g})"
-        candidate_log["penalty_weight"] = float(weight)
-        penalty_logs.append(candidate_log)
-    selected_penalty = _select_penalty_candidate(
-        penalty_candidates,
-        float(settings["raw_violation_threshold"]),
-    )
-
-    torch.manual_seed(int(settings["seed"]))
-    monokan = make_paper_monokan_model(model_config)
-    monokan_result = _train_model(
-        config,
-        settings,
-        train_products,
-        evaluation_products,
-        feature_stats,
-        monokan,
-        "MonoKAN",
-        split,
-    )
-    models = {
-        "UnconstrainedMLP": unconstrained,
-        "PenaltyMLP": selected_penalty["model"],
-        "MonoKAN": monokan,
-    }
+        models["PenaltyMLP"] = selected_penalty["model"]
+        models["MonoKAN"] = monokan
 
     predictions = _prediction_table(
         evaluation_products,
@@ -542,25 +592,47 @@ def run_idp_benchmark(
     training_info = pd.DataFrame(
         [
             {
-                "policy_name": "UnconstrainedMLP",
-                "parameter_count": _parameter_count(unconstrained),
-                "training_seconds": unconstrained_result.elapsed_seconds,
-                "selected_penalty_weight": np.nan,
-            },
-            {
-                "policy_name": "PenaltyMLP",
-                "parameter_count": _parameter_count(selected_penalty["model"]),
-                "training_seconds": selected_penalty["result"].elapsed_seconds,
-                "selected_penalty_weight": selected_penalty["weight"],
-            },
-            {
-                "policy_name": "MonoKAN",
-                "parameter_count": _parameter_count(monokan),
-                "training_seconds": monokan_result.elapsed_seconds,
+                "policy_name": "PaperFCNN",
+                "parameter_count": _parameter_count(paper_fcnn),
+                "training_seconds": paper_fcnn_result.elapsed_seconds,
                 "selected_penalty_weight": np.nan,
             },
         ]
     )
+    if selected_penalty is not None:
+        training_info = pd.concat(
+            [
+                training_info,
+                pd.DataFrame(
+                    [
+                        {
+                            "policy_name": "PenaltyMLP",
+                            "parameter_count": _parameter_count(selected_penalty["model"]),
+                            "training_seconds": selected_penalty["result"].elapsed_seconds,
+                            "selected_penalty_weight": selected_penalty["weight"],
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+    if monokan is not None and monokan_result is not None:
+        training_info = pd.concat(
+            [
+                training_info,
+                pd.DataFrame(
+                    [
+                        {
+                            "policy_name": "MonoKAN",
+                            "parameter_count": _parameter_count(monokan),
+                            "training_seconds": monokan_result.elapsed_seconds,
+                            "selected_penalty_weight": np.nan,
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
     summary = summary.merge(training_info, on="policy_name", how="left")
     order_map = {name: index for index, name in enumerate(POLICY_ORDER)}
     summary["_order"] = summary["policy_name"].map(order_map)
@@ -568,44 +640,60 @@ def run_idp_benchmark(
 
     logs = []
     for name, result in [
-        ("UnconstrainedMLP", unconstrained_result),
-        ("MonoKAN", monokan_result),
+        ("PaperFCNN", paper_fcnn_result),
     ]:
         frame = pd.DataFrame(result.training_log or [])
         frame["policy_name"] = name
         frame["penalty_weight"] = 0.0
         logs.append(frame)
+    if monokan_result is not None:
+        frame = pd.DataFrame(monokan_result.training_log or [])
+        frame["policy_name"] = "MonoKAN"
+        frame["penalty_weight"] = 0.0
+        logs.append(frame)
     logs.extend(penalty_logs)
     training_log = pd.concat(logs, ignore_index=True)
-    training_log["selected"] = ~training_log["policy_name"].str.startswith("PenaltyMLP") | (
-        training_log["penalty_weight"] == float(selected_penalty["weight"])
-    )
+    if selected_penalty is None:
+        training_log["selected"] = True
+    else:
+        training_log["selected"] = ~training_log["policy_name"].str.startswith("PenaltyMLP") | (
+            training_log["penalty_weight"] == float(selected_penalty["weight"])
+        )
 
-    spline_x, spline_values_tensor = sample_monokan_first_layer_splines(monokan, feature_index=0, samples=100)
     spline_rows = []
-    for unit_index, values in enumerate(spline_values_tensor.numpy()):
-        for x_value, spline_value in zip(spline_x.numpy(), values):
-            spline_rows.append(
-                {
-                    "hidden_unit": unit_index,
-                    "inventory_feature": float(x_value),
-                    "edge_value": float(spline_value),
-                }
-            )
+    if monokan is not None:
+        spline_x, spline_values_tensor = sample_monokan_first_layer_splines(monokan, feature_index=0, samples=100)
+        for unit_index, values in enumerate(spline_values_tensor.numpy()):
+            for x_value, spline_value in zip(spline_x.numpy(), values):
+                spline_rows.append(
+                    {
+                        "hidden_unit": unit_index,
+                        "inventory_feature": float(x_value),
+                        "edge_value": float(spline_value),
+                    }
+                )
     spline_values = pd.DataFrame(spline_rows)
 
     destination.mkdir(parents=True, exist_ok=True)
     model_dir = destination / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(unconstrained.state_dict(), model_dir / "unconstrained_mlp.pt")
-    torch.save(selected_penalty["model"].state_dict(), model_dir / "penalty_mlp.pt")
-    torch.save(monokan.state_dict(), model_dir / "monokan.pt")
+    torch.save(paper_fcnn.state_dict(), model_dir / "paper_fcnn.pt")
+    if selected_penalty is not None:
+        torch.save(selected_penalty["model"].state_dict(), model_dir / "penalty_mlp.pt")
+    if monokan is not None:
+        torch.save(monokan.state_dict(), model_dir / "monokan.pt")
     summary.to_csv(destination / "summary.csv", index=False)
+    table3 = _paper_table3(summary)
+    table3.to_csv(destination / "paper_table3_replication.csv", index=False)
     operational.to_csv(destination / "operational_metrics.csv", index=False)
     predictions.to_csv(destination / "predictions.csv", index=False)
     training_log.to_csv(destination / "training_log.csv", index=False)
     spline_values.to_csv(destination / "monokan_splines.csv", index=False)
+    if not sample_efficiency.empty:
+        sample_efficiency.to_csv(destination / "sample_efficiency.csv", index=False)
+    _save_policy_structure_plots(destination, predictions, mode)
     metadata = {
+        "mode": mode,
         "profile": profile,
         "split": split,
         "settings": settings,
@@ -613,7 +701,7 @@ def run_idp_benchmark(
             "demand_scale": feature_stats.demand_scale,
             "price_scale": feature_stats.price_scale,
         },
-        "selected_penalty_weight": selected_penalty["weight"],
+        "selected_penalty_weight": selected_penalty["weight"] if selected_penalty is not None else None,
         "penalty_candidates": [
             {
                 "weight": candidate["weight"],
@@ -631,4 +719,132 @@ def run_idp_benchmark(
         predictions=predictions,
         training_log=training_log,
         spline_values=spline_values,
+        sample_efficiency=sample_efficiency if not sample_efficiency.empty else None,
     )
+
+
+def _paper_table3(summary: pd.DataFrame) -> pd.DataFrame:
+    """Create a paper-style reward table with gaps to omniscient optimal."""
+    reward_column = "mean_reward_per_period"
+    omniscient = summary.loc[summary["policy_name"] == "OmniscientOptimal", reward_column]
+    reference = float(omniscient.iloc[0]) if not omniscient.empty else float(summary[reward_column].max())
+    table = summary[["policy_name", reward_column]].copy()
+    table = table.rename(columns={reward_column: "average_reward"})
+    table["gap_to_omniscient_pct"] = 100.0 * (table["average_reward"] / reference - 1.0)
+    return table
+
+
+def _save_policy_structure_plots(destination: Path, predictions: pd.DataFrame, mode: str) -> None:
+    """Save paper-aligned structural diagnostic plots."""
+    plots_dir = destination / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    if predictions.empty:
+        return
+    product_ids = predictions["product_id"].drop_duplicates().head(3).tolist()
+    subset = predictions[predictions["product_id"].isin(product_ids)]
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for (policy_name, product_id), rows in subset.groupby(["policy_name", "product_id"], sort=False):
+        if policy_name not in {"PaperFCNN", "MonoKAN", "OmniscientOptimal", "NonOmniscientOptimal"}:
+            continue
+        label = f"{policy_name} {product_id}"
+        rows.sort_values("inventory").plot(x="inventory", y="deployed_order", ax=ax, label=label, alpha=0.8)
+    ax.set_title("Purchase quantity vs inventory")
+    ax.set_xlabel("Inventory level")
+    ax.set_ylabel("Purchase quantity")
+    ax.grid(alpha=0.3)
+    fig.savefig(plots_dir / "figure2_policy_curves.png", bbox_inches="tight", dpi=150)
+    plt.close(fig)
+
+    zero_inventory = predictions.loc[predictions["state_index"] == 0].copy()
+    if not zero_inventory.empty:
+        fig, ax = plt.subplots(figsize=(6, 5))
+        for policy_name, rows in zero_inventory.groupby("policy_name", sort=False):
+            if policy_name not in {"PaperFCNN", "MonoKAN", "NonOmniscientOptimal"}:
+                continue
+            ax.scatter(
+                rows["omniscient_order_up_to_level"],
+                rows["order_up_to_level"],
+                c=rows["true_coefficient_of_variation"],
+                cmap="viridis",
+                label=policy_name,
+                alpha=0.7,
+            )
+        max_level = float(
+            max(zero_inventory["omniscient_order_up_to_level"].max(), zero_inventory["order_up_to_level"].max())
+        )
+        ax.plot([0, max_level], [0, max_level], color="black", linewidth=1)
+        ax.set_title("Learned vs omniscient order-up-to level")
+        ax.set_xlabel("Omniscient order-up-to level")
+        ax.set_ylabel("Learned order-up-to level")
+        ax.grid(alpha=0.3)
+        ax.legend()
+        fig.savefig(plots_dir / "figure3_order_up_to_scatter.png", bbox_inches="tight", dpi=150)
+        plt.close(fig)
+
+    if mode == "structure-ls":
+        diagnostics = _prediction_summary(predictions)
+        fig, ax = plt.subplots(figsize=(7, 4))
+        diagnostics.set_index("policy_name")["raw_violation_rate"].plot.bar(ax=ax)
+        ax.set_title("Raw monotonicity violation rate")
+        ax.set_ylabel("Fraction of adjacent inventory pairs")
+        ax.grid(axis="y", alpha=0.3)
+        fig.savefig(plots_dir / "monotonicity_violations.png", bbox_inches="tight", dpi=150)
+        plt.close(fig)
+
+
+def _run_sample_efficiency(
+    config: dict[str, Any],
+    settings: dict[str, Any],
+    model_config: dict[str, Any],
+    split: str,
+    destination: Path,
+) -> pd.DataFrame:
+    """Run a compact paper-style N/H sample-efficiency grid."""
+    benchmark = config.get("idp_benchmark", {})
+    sample_config = benchmark.get("sample_efficiency", {})
+    rows = []
+    for history_window in sample_config.get("history_windows", [config["history_length_H"]]):
+        grid_config = copy.deepcopy(config)
+        grid_config["history_length_H"] = int(history_window)
+        generator = PaperLostSalesProductGenerator(grid_config)
+        for n_products in sample_config.get("training_products_grid", [settings["training_products"]]):
+            local_settings = dict(settings)
+            local_settings["training_products"] = min(int(n_products), int(settings["training_products"]))
+            local_settings["validation_products"] = int(settings["validation_products"])
+            train_products = generator.generate(int(local_settings["training_products"]), split="train")
+            eval_products = generator.generate(int(local_settings["validation_products"]), split=split)
+            feature_stats = compute_paper_fcnn_feature_stats(train_products)
+            local_model_config = copy.deepcopy(model_config)
+            local_model_config["history_length_H"] = int(history_window)
+            torch.manual_seed(int(settings["seed"]))
+            paper_fcnn = make_paper_fcnn_model(local_model_config)
+            result = _train_model(
+                grid_config,
+                local_settings,
+                train_products,
+                eval_products,
+                feature_stats,
+                paper_fcnn,
+                "PaperFCNN",
+                split,
+            )
+            reward = _mean_validation_reward(
+                grid_config,
+                local_settings,
+                eval_products,
+                paper_fcnn,
+                "PaperFCNN",
+                feature_stats,
+                split,
+            )
+            rows.append(
+                {
+                    "history_window": int(history_window),
+                    "training_products": int(local_settings["training_products"]),
+                    "policy_name": "PaperFCNN",
+                    "mean_total_reward": reward,
+                    "training_seconds": result.elapsed_seconds,
+                }
+            )
+    destination.mkdir(parents=True, exist_ok=True)
+    return pd.DataFrame(rows)

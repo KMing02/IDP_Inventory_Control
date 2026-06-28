@@ -65,6 +65,24 @@ def test_paper_rollout_returns_reward_not_negative_reward() -> None:
     assert rewards.shape == (2,)
 
 
+def test_paper_rollout_includes_terminal_salvage_by_default() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(1, "train")
+    product = products[0].__class__(
+        **{
+            **products[0].__dict__,
+            "future_demand": [0, 0],
+            "purchase_cost": 3.0,
+            "initial_inventory": 5,
+        }
+    )
+    model = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
+    batch = make_paper_lost_sales_training_batch([product], horizon=2, generator=torch.Generator().manual_seed(0))
+    with_salvage = paper_lost_sales_fcnn_rollout(model, batch, include_terminal_salvage=True)
+    without_salvage = paper_lost_sales_fcnn_rollout(model, batch, include_terminal_salvage=False)
+
+    assert with_salvage.item() > without_salvage.item()
+
+
 def test_training_batch_uses_stored_future_demand_trace() -> None:
     product = PaperLostSalesProductGenerator(_paper_config()).generate(1, "train")[0]
     product = product.__class__(

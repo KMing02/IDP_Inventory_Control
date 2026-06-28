@@ -15,7 +15,7 @@ except ImportError as exc:  # pragma: no cover
 from torch import nn
 
 from inventory_control.policies.neural.fcnn import FCNNPolicy, PaperFCNNFeatureStats
-from inventory_control.paper_lost_sales import historical_demand_base_stock_policy
+from inventory_control.paper_lost_sales import non_omniscient_gamma_base_stock_policy
 from inventory_control.products import PaperLostSalesProduct
 
 
@@ -93,7 +93,7 @@ def make_paper_lost_sales_training_batch(
         "holding_cost": torch.tensor([p.holding_cost for p in products], dtype=torch.float32),
         "lost_sale_penalty": torch.tensor([p.lost_sale_penalty for p in products], dtype=torch.float32),
         "historical_base_stock_level": torch.tensor(
-            [historical_demand_base_stock_policy(p).S for p in products],
+            [non_omniscient_gamma_base_stock_policy(p).S for p in products],
             dtype=torch.float32,
         ),
         "demand_paths": torch.stack(demand_paths, dim=0),
@@ -194,6 +194,7 @@ def paper_lost_sales_fcnn_rollout(
     batch: dict[str, torch.Tensor],
     max_order_factor: float = PAPER_FCNN_MAX_ORDER_FACTOR,
     scale_action_by_history_mean: bool = False,
+    include_terminal_salvage: bool = True,
 ) -> torch.Tensor:
     """Return total reward per product for FCNN training."""
     inventory = batch["initial_inventory"]
@@ -221,6 +222,8 @@ def paper_lost_sales_fcnn_rollout(
         )
         total_reward = total_reward + reward
         inventory = ending_inventory
+    if include_terminal_salvage:
+        total_reward = total_reward + batch["purchase_cost"] * inventory
     return total_reward
 
 
@@ -270,6 +273,7 @@ def train_paper_lost_sales_fcnn(
     normalize_reward_loss: bool = False,
     monotonicity_penalty_weight: float = 0.0,
     monotonicity_samples_per_product: int = 1,
+    include_terminal_salvage: bool = True,
 ) -> DirectBackpropResult:
     """Train FCNN with DirectBackprop-style negative reward minimization."""
     torch.manual_seed(seed)
@@ -296,6 +300,7 @@ def train_paper_lost_sales_fcnn(
                 batch,
                 max_order_factor=max_order_factor,
                 scale_action_by_history_mean=scale_action_by_history_mean,
+                include_terminal_salvage=include_terminal_salvage,
             ).mean()
             primary_loss = historical_base_stock_imitation_loss(
                 model,
@@ -310,6 +315,7 @@ def train_paper_lost_sales_fcnn(
                 batch,
                 max_order_factor=max_order_factor,
                 scale_action_by_history_mean=scale_action_by_history_mean,
+                include_terminal_salvage=include_terminal_salvage,
             ).mean()
             primary_loss = -mean_total_reward
             if normalize_reward_loss:
@@ -360,6 +366,7 @@ def train_paper_lost_sales_fcnn(
                         validation_batch,
                         max_order_factor=max_order_factor,
                         scale_action_by_history_mean=scale_action_by_history_mean,
+                        include_terminal_salvage=include_terminal_salvage,
                     ).mean()
                 validation_reward = float(validation_reward_tensor.item())
             validation_rewards.append(float(validation_reward))

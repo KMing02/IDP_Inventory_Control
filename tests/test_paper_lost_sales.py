@@ -4,8 +4,11 @@ import pytest
 from inventory_control.paper_lost_sales import (
     BaseStockOrderPolicy,
     evaluate_paper_lost_sales_policy,
+    gamma_quantile_exact,
     historical_demand_base_stock_policy,
     monotonicity_violation_rate,
+    non_omniscient_gamma_base_stock_policy,
+    omniscient_gamma_base_stock_policy,
     oracle_gamma_base_stock_policy,
     paper_lost_sales_step,
 )
@@ -82,6 +85,17 @@ def test_paper_table_product_generation_matches_reference_shapes() -> None:
     assert len(product.future_demand) == 14
 
 
+def test_paper_table_product_generation_matches_table_1_constraints() -> None:
+    products = PaperLostSalesProductGenerator(_paper_table_config()).generate(25, "train")
+
+    assert all(product.price >= 0 for product in products)
+    assert all(0 <= product.purchase_cost <= product.price for product in products)
+    assert all(product.holding_cost >= 0 for product in products)
+    assert all(0 <= product.lost_sale_penalty <= 10 for product in products)
+    assert all(product.true_mean_demand >= 0 for product in products)
+    assert all(0 <= product.true_coefficient_of_variation <= 1 for product in products)
+
+
 def test_paper_product_observable_features_hide_future_trace() -> None:
     product = PaperLostSalesProductGenerator(_paper_table_config()).generate(1, "train")[0]
     features = product.observable_features()
@@ -132,6 +146,36 @@ def test_oracle_baseline_uses_true_gamma_parameters() -> None:
     assert high_policy.S > low_policy.S
 
 
+def test_exact_gamma_quantile_matches_known_exponential_quantile() -> None:
+    assert gamma_quantile_exact(shape=1.0, scale=2.0, quantile=0.5) == pytest.approx(2.0 * np.log(2.0))
+
+
+def test_paper_named_gamma_baselines_use_expected_information() -> None:
+    product = PaperLostSalesProduct(
+        product_id="p",
+        price=10,
+        purchase_cost=4,
+        holding_cost=1,
+        lost_sale_penalty=5,
+        true_mean_demand=10,
+        true_coefficient_of_variation=0.5,
+        gamma_shape=4,
+        gamma_scale=2,
+        demand_distribution_type="Gamma",
+        historical_demand=[8, 9, 10, 11] * 8,
+        initial_inventory=0,
+    )
+
+    omniscient = omniscient_gamma_base_stock_policy(product)
+    non_omniscient = non_omniscient_gamma_base_stock_policy(product)
+
+    assert omniscient.name == "OmniscientOptimal"
+    assert non_omniscient.name == "NonOmniscientOptimal"
+    assert omniscient.S == pytest.approx(
+        gamma_quantile_exact(product.gamma_shape, product.gamma_scale, 11 / 16)
+    )
+
+
 def test_historical_baseline_does_not_use_true_gamma_parameters() -> None:
     product_a = PaperLostSalesProduct(
         product_id="p",
@@ -152,6 +196,7 @@ def test_historical_baseline_does_not_use_true_gamma_parameters() -> None:
     )
 
     assert historical_demand_base_stock_policy(product_a).S == historical_demand_base_stock_policy(product_b).S
+    assert non_omniscient_gamma_base_stock_policy(product_a).S == non_omniscient_gamma_base_stock_policy(product_b).S
 
 
 def test_monotonicity_diagnostic_detects_non_monotone_policy() -> None:
@@ -187,25 +232,44 @@ def test_paper_evaluation_uses_reward_not_cost_names() -> None:
     assert "mean_cost_per_period" not in metrics
 
 
-def test_oracle_gamma_baseline_has_higher_reward_than_historical_on_fixed_products() -> None:
-    products = PaperLostSalesProductGenerator(_paper_config()).generate(5, "test")
-    oracle_rewards = []
-    historical_rewards = []
-    for idx, product in enumerate(products):
-        oracle = oracle_gamma_base_stock_policy(product, n_samples=10000, seed=100 + idx)
-        historical = historical_demand_base_stock_policy(product)
-        oracle_rewards.append(
-            evaluate_paper_lost_sales_policy(product, oracle, horizon=50, n_episodes=1, seed=200 + idx)[
-                "mean_total_reward"
-            ]
-        )
-        historical_rewards.append(
-            evaluate_paper_lost_sales_policy(product, historical, horizon=50, n_episodes=1, seed=200 + idx)[
-                "mean_total_reward"
-            ]
-        )
+def test_paper_evaluation_horizon_includes_burn_in_periods() -> None:
+    product = PaperLostSalesProduct(
+        product_id="p",
+        price=0,
+        purchase_cost=0,
+        holding_cost=0,
+        lost_sale_penalty=1,
+        true_mean_demand=1,
+        true_coefficient_of_variation=0.1,
+        gamma_shape=100,
+        gamma_scale=0.01,
+        demand_distribution_type="Gamma",
+        historical_demand=[1] * 32,
+        initial_inventory=0,
+        future_demand=[1, 10, 10],
+    )
 
-    assert np.mean(oracle_rewards) >= np.mean(historical_rewards)
+    metrics = evaluate_paper_lost_sales_policy(
+        product,
+        BaseStockOrderPolicy(S=0, name="zero"),
+        horizon=3,
+        n_episodes=1,
+        seed=0,
+        burn_in=1,
+    )
+
+    assert metrics["mean_total_reward"] == -20
+    assert metrics["mean_reward_per_period"] == -10
+
+
+def test_omniscient_gamma_baseline_uses_exact_true_distribution_quantile() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(5, "test")
+    product = products[0]
+    oracle = oracle_gamma_base_stock_policy(product, n_samples=10000, seed=100)
+    exact = omniscient_gamma_base_stock_policy(product)
+
+    assert oracle.name == "OracleGammaBaseStock"
+    assert oracle.S == pytest.approx(exact.S)
 
 
 def test_common_paper_test_product_count_uses_strictest_runtime_cap() -> None:

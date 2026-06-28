@@ -37,7 +37,7 @@ monokan:
 idp_benchmark:
   seed: 2025
   hidden_layers: 2
-  hidden_units: 16
+  hidden_units: 32
   activation: ELU
   max_order_factor: 4.0
   scale_action_by_history_mean: true
@@ -45,6 +45,7 @@ idp_benchmark:
   monotonicity_samples_per_product: 2
   penalty_weights: [0.1, 1.0, 10.0]
   raw_violation_threshold: 0.01
+  acceptance_reward_gap_tolerance_pct: 0.5
   compact:
     training_products: 32
     validation_products: 8
@@ -56,6 +57,8 @@ idp_benchmark:
     evaluation_horizon: 60
     burn_in: 0
     inventory_states: 25
+    structure_products: 3
+    order_up_to_products: 32
     oracle_mc_samples: 5000
     penalty_weights: [10.0]
   full:
@@ -69,7 +72,26 @@ idp_benchmark:
     evaluation_horizon: 520
     burn_in: 20
     inventory_states: 100
+    structure_products: 3
+    order_up_to_products: 1000
     oracle_mc_samples: 200000
+  paper_replication:
+    training_products: 40000
+    validation_products: 100000
+    batch_size: 2500
+    training_horizon: 100
+    imitation_epochs: 20
+    reward_epochs: 1000
+    validation_interval: 10
+    evaluation_horizon: 520
+    burn_in: 20
+    inventory_states: 100
+    structure_products: 3
+    order_up_to_products: 1000
+    oracle_mc_samples: 200000
+  sample_efficiency:
+    history_windows: [16, 32, 64]
+    training_products_grid: [100, 1000, 10000, 40000]
 
 demand_distribution: Gamma
 

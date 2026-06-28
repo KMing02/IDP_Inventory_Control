@@ -13,7 +13,12 @@ from inventory_control.idp_benchmark import run_idp_benchmark
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile", choices=["compact", "full"], default="compact")
+    parser.add_argument(
+        "--mode",
+        choices=["replicate-ls", "structure-ls", "sample-efficiency"],
+        default="structure-ls",
+    )
+    parser.add_argument("--profile", choices=["compact", "full", "paper_replication"], default="compact")
     parser.add_argument("--split", choices=["validation", "test"], default="validation")
     parser.add_argument("--final-test", action="store_true", help="Required for held-out test evaluation.")
     parser.add_argument("--config", type=Path)
@@ -23,6 +28,7 @@ def main() -> None:
     artifacts = run_idp_benchmark(
         config_path=args.config,
         profile=args.profile,
+        mode=args.mode,
         split=args.split,
         final_test=args.final_test,
         output_dir=args.output_dir,

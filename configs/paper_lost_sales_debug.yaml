@@ -45,6 +45,7 @@ idp_benchmark:
   monotonicity_samples_per_product: 1
   penalty_weights: [0.1, 1.0, 10.0]
   raw_violation_threshold: 0.01
+  acceptance_reward_gap_tolerance_pct: 0.5
   compact:
     training_products: 4
     validation_products: 2
@@ -56,6 +57,8 @@ idp_benchmark:
     evaluation_horizon: 5
     burn_in: 0
     inventory_states: 5
+    structure_products: 2
+    order_up_to_products: 2
     oracle_mc_samples: 100
     penalty_weights: [10.0]
   full:
@@ -69,7 +72,26 @@ idp_benchmark:
     evaluation_horizon: 12
     burn_in: 2
     inventory_states: 10
+    structure_products: 2
+    order_up_to_products: 2
     oracle_mc_samples: 200
+  paper_replication:
+    training_products: 4
+    validation_products: 2
+    batch_size: 2
+    training_horizon: 3
+    imitation_epochs: 1
+    reward_epochs: 1
+    validation_interval: 1
+    evaluation_horizon: 5
+    burn_in: 0
+    inventory_states: 5
+    structure_products: 2
+    order_up_to_products: 2
+    oracle_mc_samples: 100
+  sample_efficiency:
+    history_windows: [8]
+    training_products_grid: [2, 4]
 
 demand_distribution: Gamma
 

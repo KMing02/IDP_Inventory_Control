@@ -23,6 +23,7 @@ def test_prediction_summary_reports_accuracy_and_monotonicity() -> None:
             "product_id": ["p"] * 3,
             "policy_name": ["model"] * 3,
             "state_index": [0, 1, 2],
+            "inventory": [0.0, 1.0, 2.0],
             "raw_order": [2.0, 3.0, 1.0],
             "deployed_order": [2.0, 2.5, 1.0],
             "error": [0.0, 1.0, -1.0],
@@ -65,6 +66,7 @@ def test_idp_test_split_requires_explicit_confirmation(tmp_path: Path) -> None:
         run_idp_benchmark(
             config_path="configs/paper_lost_sales_debug.yaml",
             profile="compact",
+            mode="structure-ls",
             split="test",
             output_dir=tmp_path,
         )
@@ -74,18 +76,20 @@ def test_compact_idp_benchmark_smoke(tmp_path: Path) -> None:
     artifacts = run_idp_benchmark(
         config_path="configs/paper_lost_sales_debug.yaml",
         profile="compact",
+        mode="structure-ls",
         output_dir=tmp_path,
     )
 
     expected_policies = {
         "HistoricalDemandBaseStock",
-        "OracleGammaBaseStock",
-        "UnconstrainedMLP",
+        "OmniscientOptimal",
+        "NonOmniscientOptimal",
+        "PaperFCNN",
         "PenaltyMLP",
         "MonoKAN",
     }
     assert set(artifacts.summary["policy_name"]) == expected_policies
-    assert {"mae", "rmse", "raw_violation_rate", "parameter_count", "training_seconds"}.issubset(
+    assert {"order_up_to_mae", "raw_violation_rate", "parameter_count", "training_seconds"}.issubset(
         artifacts.summary.columns
     )
     assert artifacts.predictions.groupby(["product_id", "policy_name"]).size().nunique() == 1
@@ -98,6 +102,7 @@ def test_compact_idp_benchmark_smoke(tmp_path: Path) -> None:
     ].item() == 0.0
     for filename in [
         "summary.csv",
+        "paper_table3_replication.csv",
         "operational_metrics.csv",
         "predictions.csv",
         "training_log.csv",
@@ -105,3 +110,33 @@ def test_compact_idp_benchmark_smoke(tmp_path: Path) -> None:
         "metadata.json",
     ]:
         assert (tmp_path / filename).exists()
+    assert (tmp_path / "plots" / "figure2_policy_curves.png").exists()
+
+
+def test_replicate_ls_mode_smoke(tmp_path: Path) -> None:
+    artifacts = run_idp_benchmark(
+        config_path="configs/paper_lost_sales_debug.yaml",
+        profile="compact",
+        mode="replicate-ls",
+        output_dir=tmp_path,
+    )
+
+    assert {"PaperFCNN", "OmniscientOptimal", "NonOmniscientOptimal"}.issubset(
+        set(artifacts.summary["policy_name"])
+    )
+    assert (tmp_path / "paper_table3_replication.csv").exists()
+
+
+def test_sample_efficiency_mode_smoke(tmp_path: Path) -> None:
+    artifacts = run_idp_benchmark(
+        config_path="configs/paper_lost_sales_debug.yaml",
+        profile="compact",
+        mode="sample-efficiency",
+        output_dir=tmp_path,
+    )
+
+    assert artifacts.sample_efficiency is not None
+    assert {"history_window", "training_products", "policy_name", "mean_total_reward"}.issubset(
+        artifacts.sample_efficiency.columns
+    )
+    assert (tmp_path / "sample_efficiency.csv").exists()
