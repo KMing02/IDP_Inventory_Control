@@ -86,6 +86,8 @@ def test_compact_idp_benchmark_smoke(tmp_path: Path) -> None:
         "NonOmniscientOptimal",
         "PaperFCNN",
         "PenaltyMLP",
+        "PositiveWeightMLP",
+        "ConstrainedMonoMLP",
         "MonoKAN",
     }
     assert set(artifacts.summary["policy_name"]) == expected_policies
@@ -100,6 +102,13 @@ def test_compact_idp_benchmark_smoke(tmp_path: Path) -> None:
     assert artifacts.summary.loc[
         artifacts.summary["policy_name"] == "MonoKAN", "raw_violation_rate"
     ].item() == 0.0
+    for policy_name in ["PositiveWeightMLP", "ConstrainedMonoMLP"]:
+        assert artifacts.summary.loc[
+            artifacts.summary["policy_name"] == policy_name, "raw_violation_rate"
+        ].item() == 0.0
+        assert artifacts.summary.loc[
+            artifacts.summary["policy_name"] == policy_name, "deployed_violation_rate"
+        ].item() == 0.0
     for filename in [
         "summary.csv",
         "paper_table3_replication.csv",

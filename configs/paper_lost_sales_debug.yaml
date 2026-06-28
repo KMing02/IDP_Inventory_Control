@@ -34,6 +34,21 @@ monokan:
   scale_action_by_history_mean: true
   max_order_factor: 2.0
 
+positive_weight_mlp:
+  hidden_layers: 1
+  hidden_units: 4
+  activation: ELU
+  monotonic_feature: 0
+  monotonic_direction: -1
+
+constrained_monotone_mlp:
+  hidden_layers: 1
+  hidden_units: 4
+  activation: ELU
+  mixed_activation: true
+  monotonic_feature: 0
+  monotonic_direction: -1
+
 idp_benchmark:
   seed: 2025
   hidden_layers: 1

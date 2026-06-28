@@ -34,6 +34,21 @@ monokan:
   max_order_factor: 2.0
   TODO: "Continue tuning MonoKAN width/grid after validating the adapted implementation against the official repository."
 
+positive_weight_mlp:
+  hidden_layers: 2
+  hidden_units: 32
+  activation: ELU
+  monotonic_feature: 0
+  monotonic_direction: -1
+
+constrained_monotone_mlp:
+  hidden_layers: 2
+  hidden_units: 32
+  activation: ELU
+  mixed_activation: true
+  monotonic_feature: 0
+  monotonic_direction: -1
+
 idp_benchmark:
   seed: 2025
   hidden_layers: 2

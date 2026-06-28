@@ -172,11 +172,30 @@ def main() -> None:
     indexed = summary.set_index("policy_name")
     fcnn = indexed.loc["PaperFCNN"]
     mono = indexed.loc["MonoKAN"]
-    penalty = indexed.loc["PenaltyMLP"]
+    architecture_names = [
+        name for name in ["PositiveWeightMLP", "ConstrainedMonoMLP", "MonoKAN"] if name in indexed.index
+    ]
+    architecture_rows = indexed.loc[architecture_names] if architecture_names else pd.DataFrame()
+    compliant_architectures = (
+        architecture_rows[
+            (architecture_rows["raw_violation_rate"] == 0) & (architecture_rows["deployed_violation_rate"] == 0)
+        ]
+        if not architecture_rows.empty
+        else pd.DataFrame()
+    )
+    best_architecture_name = (
+        compliant_architectures["mean_reward_per_period"].idxmax()
+        if not compliant_architectures.empty
+        else "MonoKAN"
+    )
+    best_architecture = indexed.loc[best_architecture_name]
+    best_architecture_gap = 100.0 * (
+        best_architecture["mean_reward_per_period"] / fcnn["mean_reward_per_period"] - 1.0
+    )
     reward_gap = 100.0 * (mono["mean_reward_per_period"] / fcnn["mean_reward_per_period"] - 1.0)
     speedup = fcnn["training_seconds"] / mono["training_seconds"] if mono["training_seconds"] > 0 else float("nan")
-    accepted_reward = reward_gap >= -0.5
-    accepted_structure = mono["raw_violation_rate"] == 0 and mono["deployed_violation_rate"] == 0
+    accepted_reward = best_architecture_gap >= -0.5
+    accepted_structure = not compliant_architectures.empty
 
     pdf_path = OUT_DIR / "idp_monotonic_inventory_report.pdf"
     page = 1
@@ -193,10 +212,10 @@ def main() -> None:
         )
         y -= 0.02
         status = [
-            f"Structure criterion: MonoKAN raw and deployed monotonicity violations are {_fmt(mono['raw_violation_rate'])} and {_fmt(mono['deployed_violation_rate'])}; this passes the architecture-enforced monotonicity check.",
-            f"Performance criterion: MonoKAN reward is {_fmt(mono['mean_reward_per_period'])} per period versus PaperFCNN {_fmt(fcnn['mean_reward_per_period'])}, a {reward_gap:.1f}% gap; this compact run does not yet meet the match-FCNN requirement.",
+            f"Structure criterion: architecture-enforced candidates are {', '.join(architecture_names)}; compliant candidates have zero raw and deployed monotonicity violations.",
+            f"Performance criterion: the best compliant architecture is {best_architecture_name} with reward {_fmt(best_architecture['mean_reward_per_period'])} per period versus PaperFCNN {_fmt(fcnn['mean_reward_per_period'])}, a {best_architecture_gap:.1f}% gap.",
             f"Efficiency criterion: compact training time is {_fmt(mono['training_seconds'])} seconds for MonoKAN versus {_fmt(fcnn['training_seconds'])} seconds for PaperFCNN, about {_fmt(speedup, 1)}x faster in this smoke setting.",
-            "Interpretability criterion: MonoKAN exposes monotone spline components and exact zero violations; the FCNN and penalty models can appear nonincreasing on the sampled grid but do not encode the order-up-to slope by construction.",
+            "Interpretability criterion: MonoKAN exposes spline components; ConstrainedMonoMLP tests the C-MNN-style activation mix; PositiveWeightMLP is an expressiveness control.",
         ]
         y = _bullets(fig, 0.09, y, status, width=92, size=10)
         y -= 0.01
@@ -213,7 +232,7 @@ def main() -> None:
             [
                 ["Architecture-enforced monotonicity", "Pass" if accepted_structure else "Fail"],
                 ["Reward no worse than FCNN by 0.5%", "Pass" if accepted_reward else "Fail"],
-                ["Primary next action", "Tune MonoKAN capacity/training under LS before extensions"],
+                ["Primary next action", "Tune the best hard-monotone architecture under LS before extensions"],
             ],
             columns=["Acceptance item", "Current compact result"],
         )
@@ -226,7 +245,7 @@ def main() -> None:
         equations = (
             "State y_t is on-hand inventory and q_t is the purchase quantity. With no lead time and lost sales, available inventory is a_t = y_t + q_t, sales are min(d_t, a_t), and next inventory is y_{t+1} = max(a_t - d_t, 0). The one-period reward used for evaluation is revenue minus purchase and holding costs.\n"
             "For a Gamma-demand product, the optimal no-lead-time base-stock policy has q*(y) = max(S - y, 0), where S is the critical-quantile order-up-to level. Therefore the desired structural derivative is dq*/dy = -1 while y < S, and dq*/dy = 0 after the cap at zero order.\n"
-            "Monotonicity means y_2 > y_1 implies q_theta(y_2, z) <= q_theta(y_1, z), where z contains product and demand-history features. A penalty baseline adds loss terms for violations. MonoKAN instead restricts the function class so this inequality is enforced by the architecture."
+            "Monotonicity means y_2 > y_1 implies q_theta(y_2, z) <= q_theta(y_1, z), where z contains product and demand-history features. A penalty baseline adds loss terms for violations. MonoKAN and the constrained MLPs instead restrict the function class so this inequality is enforced by the architecture."
         )
         y = _wrapped(fig, 0.07, y, equations, width=98, size=10)
         y -= 0.025
@@ -277,7 +296,7 @@ def main() -> None:
             fig,
             0.07,
             0.855,
-            "Interpretation: in the compact run, PaperFCNN and PenaltyMLP tie on reward because they share the same initialization and the penalty has no sampled violations. MonoKAN is structurally cleaner but over-orders, creating high inventory and a large reward gap. The compact Table-3-style ranking is not paper-faithful because the product count and horizon are intentionally tiny.",
+            "Interpretation: in the compact run, PaperFCNN and PenaltyMLP can tie when the sampled penalty is inactive. The hard-monotone architectures should be read by both zero violations and reward gap. The compact Table-3-style ranking is not paper-faithful because the product count and horizon are intentionally tiny.",
             width=96,
             size=10,
         )
@@ -290,7 +309,7 @@ def main() -> None:
             fig,
             0.07,
             0.30,
-            f"Mathematical reading: MonoKAN has zero violation rate and zero slope deviation on the diagnostic grid, so it satisfies q(y_hi) <= q(y_lo) exactly in the tested raw and deployed policies. However, the reward gap is {reward_gap:.1f}%, so structure is currently bought at unacceptable reward loss.",
+            f"Mathematical reading: the hard-monotone candidates target q(y_hi) <= q(y_lo) without penalty terms. The current best compliant architecture is {best_architecture_name}; its reward gap is {best_architecture_gap:.1f}%, so the structure claim must still be paired with FCNN-level reward.",
             width=96,
             size=10,
         )
@@ -303,7 +322,7 @@ def main() -> None:
             fig,
             0.07,
             0.31,
-            "Graphical reading: the desired point is near zero violations and near zero reward gap to PaperFCNN. PenaltyMLP sits on the FCNN performance point in this compact run but does not add architecture-level guarantees. MonoKAN sits at the structural target but not the reward target.",
+            "Graphical reading: the desired point is near zero violations and near zero reward gap to PaperFCNN. PenaltyMLP may sit near the FCNN performance point but does not add architecture-level guarantees. The hard-monotone points test whether exact structure can be retained without reward loss.",
             width=96,
             size=10,
         )
@@ -372,8 +391,8 @@ def main() -> None:
         y = 0.85
         conclusions = [
             "The current implementation matches the project direction: LS-first, synthesized products, paper-style baselines, architecture-enforced monotonicity, penalty kept as a reference baseline.",
-            "The compact evidence supports the structural claim for MonoKAN: zero raw and deployed violations, plus interpretable splines.",
-            "The compact evidence does not yet support the full project success claim because MonoKAN does not match FCNN reward. This must be fixed before claiming an advantage.",
+            "The compact evidence should be judged across MonoKAN, ConstrainedMonoMLP, and PositiveWeightMLP: zero raw and deployed violations are necessary but not sufficient.",
+            "The compact evidence does not support a full project success claim unless at least one hard-monotone architecture also matches FCNN reward.",
             "The penalty baseline is not the proposed method. It remains useful because it mirrors the reference paper's regularization idea and demonstrates why architectural enforcement is a sharper structural intervention.",
         ]
         y = _bullets(fig, 0.09, y, conclusions, width=90, size=10)
@@ -381,7 +400,7 @@ def main() -> None:
         next_steps = pd.DataFrame(
             [
                 ["1", "Run paper_replication LS baseline", "Establish credible FCNN and optimal baselines"],
-                ["2", "Tune MonoKAN under identical LS data", "Close reward gap without adding monotonicity penalties"],
+                ["2", "Tune hard-monotone architectures under identical LS data", "Close reward gap without adding monotonicity penalties"],
                 ["3", "Run structure-ls full validation", "Produce final policy curves and violation diagnostics"],
                 ["4", "Run protected final test once", "Report held-out result only after model choices are frozen"],
             ],
@@ -392,7 +411,7 @@ def main() -> None:
             fig,
             0.07,
             0.15,
-            "Bottom line: the report shows mathematically and graphically that architectural monotonicity is working, but the current compact MonoKAN policy is not yet operationally competitive with the FCNN.",
+            "Bottom line: the report shows mathematically and graphically whether architectural monotonicity is working, but a hard-monotone policy must still be operationally competitive with the FCNN.",
             width=96,
             size=10.5,
         )

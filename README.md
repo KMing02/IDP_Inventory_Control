@@ -361,6 +361,8 @@ lost-sales setting from Maggiar et al. before considering any extensions.
 
 - `PaperFCNN`: the causal-CNN plus MLP architecture from the paper.
 - `MonoKAN`: a Hermite-spline architecture with nonincreasing inventory response enforced by construction.
+- `ConstrainedMonoMLP`: a C-MNN-style constrained monotone MLP with mixed monotone activations.
+- `PositiveWeightMLP`: a simpler positive-weight monotone MLP used as an expressiveness control.
 - `PenaltyMLP`: an optional penalty-based reference, not the primary method.
 - `NonOmniscientOptimal`: Gamma method-of-moments base-stock benchmark using historical demand.
 - `OmniscientOptimal`: exact Gamma critical-quantile base-stock benchmark using hidden parameters.
@@ -399,9 +401,10 @@ plots/
 
 The primary report is `paper_table3_replication.csv`, which gives average
 reward and gap to the omniscient optimal benchmark. Structural artifacts include
-policy curves, order-up-to scatter plots, violation rates, slope diagnostics, and
-MonoKAN spline samples. Perishability, multi-echelon, and real-world data are
-intentionally out of scope until the LS replication is credible.
+policy curves, order-up-to scatter plots, violation rates, slope diagnostics,
+MonoKAN spline samples, and constrained-MLP architecture comparisons.
+Perishability, multi-echelon, and real-world data are intentionally out of scope
+until the LS replication is credible.
 
 Open `notebooks/idp_monotonic_inventory_control.ipynb` for the visual analysis.
 Its default `PROFILE="auto"` loads full validation artifacts when present and

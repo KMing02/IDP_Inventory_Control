@@ -37,6 +37,10 @@ from inventory_control.policies.neural.fcnn import (
     compute_paper_fcnn_feature_stats,
     make_paper_fcnn_model,
 )
+from inventory_control.policies.neural.constrained_mlp import (
+    make_constrained_monotone_mlp_model,
+    make_positive_weight_mlp_model,
+)
 from inventory_control.policies.neural.monokan import (
     make_paper_monokan_model,
     sample_monokan_first_layer_splines,
@@ -47,6 +51,8 @@ from inventory_control.training.direct_backprop import DirectBackpropResult, tra
 
 POLICY_ORDER = [
     "PaperFCNN",
+    "PositiveWeightMLP",
+    "ConstrainedMonoMLP",
     "MonoKAN",
     "PenaltyMLP",
     "NonOmniscientOptimal",
@@ -133,6 +139,20 @@ def _model_config(config: dict[str, Any], settings: dict[str, Any]) -> dict[str,
             "hidden_units": int(settings["hidden_units"]),
             "max_order_factor": float(settings["max_order_factor"]),
             "scale_action_by_history_mean": bool(settings["scale_action_by_history_mean"]),
+        },
+        "positive_weight_mlp": {
+            **config.get("positive_weight_mlp", {}),
+            "hidden_layers": int(settings["hidden_layers"]),
+            "hidden_units": int(settings["hidden_units"]),
+            "activation": str(settings.get("activation", config["fcnn"]["activation"])),
+            "mixed_activation": False,
+        },
+        "constrained_monotone_mlp": {
+            **config.get("constrained_monotone_mlp", {}),
+            "hidden_layers": int(settings["hidden_layers"]),
+            "hidden_units": int(settings["hidden_units"]),
+            "activation": str(settings.get("activation", config["fcnn"]["activation"])),
+            "mixed_activation": True,
         },
     }
 
@@ -486,6 +506,10 @@ def run_idp_benchmark(
     selected_penalty: dict[str, Any] | None = None
     monokan_result: DirectBackpropResult | None = None
     monokan: nn.Module | None = None
+    positive_weight_result: DirectBackpropResult | None = None
+    positive_weight_mlp: nn.Module | None = None
+    constrained_mlp_result: DirectBackpropResult | None = None
+    constrained_mlp: nn.Module | None = None
     sample_efficiency = pd.DataFrame()
     if mode == "sample-efficiency":
         sample_efficiency = _run_sample_efficiency(
@@ -545,6 +569,30 @@ def run_idp_benchmark(
             penalty_candidates,
             float(settings["raw_violation_threshold"]),
         )
+        torch.manual_seed(int(settings["seed"]) + 101)
+        positive_weight_mlp = make_positive_weight_mlp_model(model_config)
+        positive_weight_result = _train_model(
+            config,
+            settings,
+            train_products,
+            evaluation_products,
+            feature_stats,
+            positive_weight_mlp,
+            "PositiveWeightMLP",
+            split,
+        )
+        torch.manual_seed(int(settings["seed"]) + 102)
+        constrained_mlp = make_constrained_monotone_mlp_model(model_config)
+        constrained_mlp_result = _train_model(
+            config,
+            settings,
+            train_products,
+            evaluation_products,
+            feature_stats,
+            constrained_mlp,
+            "ConstrainedMonoMLP",
+            split,
+        )
         torch.manual_seed(int(settings["seed"]))
         monokan = make_paper_monokan_model(model_config)
         monokan_result = _train_model(
@@ -558,6 +606,8 @@ def run_idp_benchmark(
             split,
         )
         models["PenaltyMLP"] = selected_penalty["model"]
+        models["PositiveWeightMLP"] = positive_weight_mlp
+        models["ConstrainedMonoMLP"] = constrained_mlp
         models["MonoKAN"] = monokan
 
     predictions = _prediction_table(
@@ -616,6 +666,40 @@ def run_idp_benchmark(
             ],
             ignore_index=True,
         )
+    if positive_weight_mlp is not None and positive_weight_result is not None:
+        training_info = pd.concat(
+            [
+                training_info,
+                pd.DataFrame(
+                    [
+                        {
+                            "policy_name": "PositiveWeightMLP",
+                            "parameter_count": _parameter_count(positive_weight_mlp),
+                            "training_seconds": positive_weight_result.elapsed_seconds,
+                            "selected_penalty_weight": np.nan,
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+    if constrained_mlp is not None and constrained_mlp_result is not None:
+        training_info = pd.concat(
+            [
+                training_info,
+                pd.DataFrame(
+                    [
+                        {
+                            "policy_name": "ConstrainedMonoMLP",
+                            "parameter_count": _parameter_count(constrained_mlp),
+                            "training_seconds": constrained_mlp_result.elapsed_seconds,
+                            "selected_penalty_weight": np.nan,
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
     if monokan is not None and monokan_result is not None:
         training_info = pd.concat(
             [
@@ -651,6 +735,16 @@ def run_idp_benchmark(
         frame["policy_name"] = "MonoKAN"
         frame["penalty_weight"] = 0.0
         logs.append(frame)
+    if positive_weight_result is not None:
+        frame = pd.DataFrame(positive_weight_result.training_log or [])
+        frame["policy_name"] = "PositiveWeightMLP"
+        frame["penalty_weight"] = 0.0
+        logs.append(frame)
+    if constrained_mlp_result is not None:
+        frame = pd.DataFrame(constrained_mlp_result.training_log or [])
+        frame["policy_name"] = "ConstrainedMonoMLP"
+        frame["penalty_weight"] = 0.0
+        logs.append(frame)
     logs.extend(penalty_logs)
     training_log = pd.concat(logs, ignore_index=True)
     if selected_penalty is None:
@@ -680,6 +774,10 @@ def run_idp_benchmark(
     torch.save(paper_fcnn.state_dict(), model_dir / "paper_fcnn.pt")
     if selected_penalty is not None:
         torch.save(selected_penalty["model"].state_dict(), model_dir / "penalty_mlp.pt")
+    if positive_weight_mlp is not None:
+        torch.save(positive_weight_mlp.state_dict(), model_dir / "positive_weight_mlp.pt")
+    if constrained_mlp is not None:
+        torch.save(constrained_mlp.state_dict(), model_dir / "constrained_monotone_mlp.pt")
     if monokan is not None:
         torch.save(monokan.state_dict(), model_dir / "monokan.pt")
     summary.to_csv(destination / "summary.csv", index=False)
@@ -744,7 +842,14 @@ def _save_policy_structure_plots(destination: Path, predictions: pd.DataFrame, m
     subset = predictions[predictions["product_id"].isin(product_ids)]
     fig, ax = plt.subplots(figsize=(8, 5))
     for (policy_name, product_id), rows in subset.groupby(["policy_name", "product_id"], sort=False):
-        if policy_name not in {"PaperFCNN", "MonoKAN", "OmniscientOptimal", "NonOmniscientOptimal"}:
+        if policy_name not in {
+            "PaperFCNN",
+            "PositiveWeightMLP",
+            "ConstrainedMonoMLP",
+            "MonoKAN",
+            "OmniscientOptimal",
+            "NonOmniscientOptimal",
+        }:
             continue
         label = f"{policy_name} {product_id}"
         rows.sort_values("inventory").plot(x="inventory", y="deployed_order", ax=ax, label=label, alpha=0.8)
@@ -759,7 +864,7 @@ def _save_policy_structure_plots(destination: Path, predictions: pd.DataFrame, m
     if not zero_inventory.empty:
         fig, ax = plt.subplots(figsize=(6, 5))
         for policy_name, rows in zero_inventory.groupby("policy_name", sort=False):
-            if policy_name not in {"PaperFCNN", "MonoKAN", "NonOmniscientOptimal"}:
+            if policy_name not in {"PaperFCNN", "PositiveWeightMLP", "ConstrainedMonoMLP", "MonoKAN", "NonOmniscientOptimal"}:
                 continue
             ax.scatter(
                 rows["omniscient_order_up_to_level"],
