@@ -34,6 +34,80 @@ monokan:
   scale_action_by_history_mean: true
   max_order_factor: 2.0
 
+positive_weight_mlp:
+  hidden_layers: 1
+  hidden_units: 4
+  activation: ELU
+  monotonic_feature: 0
+  monotonic_direction: -1
+
+constrained_monotone_mlp:
+  hidden_layers: 1
+  hidden_units: 4
+  activation: ELU
+  mixed_activation: true
+  monotonic_feature: 0
+  monotonic_direction: -1
+
+idp_benchmark:
+  seed: 2025
+  hidden_layers: 1
+  hidden_units: 4
+  activation: ELU
+  max_order_factor: 4.0
+  scale_action_by_history_mean: true
+  normalize_reward_loss: true
+  monotonicity_samples_per_product: 1
+  penalty_weights: [0.1, 1.0, 10.0]
+  raw_violation_threshold: 0.01
+  acceptance_reward_gap_tolerance_pct: 0.5
+  compact:
+    training_products: 4
+    validation_products: 2
+    batch_size: 2
+    training_horizon: 3
+    imitation_epochs: 1
+    reward_epochs: 1
+    validation_interval: 1
+    evaluation_horizon: 5
+    burn_in: 0
+    inventory_states: 5
+    structure_products: 2
+    order_up_to_products: 2
+    oracle_mc_samples: 100
+    penalty_weights: [10.0]
+  full:
+    training_products: 8
+    validation_products: 2
+    batch_size: 4
+    training_horizon: 8
+    imitation_epochs: 1
+    reward_epochs: 2
+    validation_interval: 1
+    evaluation_horizon: 12
+    burn_in: 2
+    inventory_states: 10
+    structure_products: 2
+    order_up_to_products: 2
+    oracle_mc_samples: 200
+  paper_replication:
+    training_products: 4
+    validation_products: 2
+    batch_size: 2
+    training_horizon: 3
+    imitation_epochs: 1
+    reward_epochs: 1
+    validation_interval: 1
+    evaluation_horizon: 5
+    burn_in: 0
+    inventory_states: 5
+    structure_products: 2
+    order_up_to_products: 2
+    oracle_mc_samples: 100
+  sample_efficiency:
+    history_windows: [8]
+    training_products_grid: [2, 4]
+
 demand_distribution: Gamma
 
 product_features:
@@ -67,6 +141,7 @@ runtime:
   fcnn_validation_products: 2
   fcnn_train_epochs: 2
   monokan_sweep_train_products: 8
+  monokan_sweep_selection_products: 2
   monokan_sweep_batch_size: 4
   monokan_sweep_horizon: 8
   monokan_sweep_epochs: 2

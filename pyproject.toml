@@ -13,10 +13,11 @@ dependencies = [
     "pandas",
     "matplotlib",
     "pyyaml",
+    "scipy",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "torch"]
+dev = ["pytest", "torch", "jupyter", "nbformat", "nbconvert"]
 neural = ["torch"]
 
 [tool.setuptools.packages.find]

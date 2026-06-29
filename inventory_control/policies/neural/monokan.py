@@ -99,10 +99,10 @@ class HermiteKANLayer(nn.Module):
         self.register_buffer("grid", grid_values.repeat(self.num_edges, 1))
         coef = torch.zeros(self.num_edges, self.num_grid_intervals + 1, 2)
         coef[:, :, 0] = noise_scale * torch.randn(self.num_edges, self.num_grid_intervals + 1)
-        coef[:, :, 1] = 1.0
         self.coef = nn.Parameter(coef)
-        self.scale_base = nn.Parameter(torch.ones(self.num_edges) / max(self.in_dim, 1) ** 0.5)
-        self.scale_spline = nn.Parameter(torch.ones(self.num_edges))
+        edge_scale = 1.0 / max(self.in_dim, 1)
+        self.scale_base = nn.Parameter(torch.full((self.num_edges,), edge_scale))
+        self.scale_spline = nn.Parameter(torch.full((self.num_edges,), edge_scale))
         self.bias = nn.Parameter(torch.zeros(self.out_dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -163,6 +163,7 @@ class MonoKANPolicy(nn.Module):
         grid: int = 5,
         grid_range: tuple[float, float] = (-2.0, 4.0),
         monotonic_vars: dict[int, int] | None = None,
+        initial_normalized_order: float = 0.5,
     ) -> None:
         super().__init__()
         self.monotonic_vars = dict(monotonic_vars or {})
@@ -174,6 +175,7 @@ class MonoKANPolicy(nn.Module):
             ]
         )
         self.apply_monotonic_constraints()
+        self._calibrate_initial_output(float(initial_normalized_order))
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """Return non-negative normalized order quantity."""
@@ -181,6 +183,19 @@ class MonoKANPolicy(nn.Module):
         for layer in self.layers:
             x = layer(x)
         return torch.nn.functional.softplus(x).squeeze(-1)
+
+    @torch.no_grad()
+    def _calibrate_initial_output(self, target_order: float) -> None:
+        """Set the final bias to a stable normalized order at a reference input."""
+        if target_order <= 0:
+            raise ValueError("initial_normalized_order must be positive")
+        reference = torch.ones(1, self.layers[0].in_dim, device=self.layers[0].bias.device)
+        reference[:, 0] = 0.0
+        x = reference
+        for layer in self.layers:
+            x = layer(x)
+        target_pre_softplus = torch.log(torch.expm1(torch.tensor(target_order, device=x.device)))
+        self.layers[-1].bias.add_(target_pre_softplus - x.squeeze())
 
     @torch.no_grad()
     def apply_monotonic_constraints(self) -> None:
@@ -294,3 +309,38 @@ def monokan_inventory_violation_rate(
         return 0.0
     violations = orders[1:] > orders[:-1] + 1e-6
     return float(violations.float().mean().item())
+
+
+def sample_monokan_first_layer_splines(
+    model: MonoKANPolicy,
+    feature_index: int = 0,
+    samples: int = 100,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample first-layer edge functions for one input feature.
+
+    Returns a common x-grid and one row per hidden/output unit. Values include
+    both the base and spline terms for the selected edge, but not layer bias.
+    """
+    if not model.layers:
+        raise ValueError("MonoKAN model has no layers")
+    layer = model.layers[0]
+    if feature_index < 0 or feature_index >= layer.in_dim:
+        raise ValueError(f"feature_index must be in [0, {layer.in_dim})")
+    if samples < 2:
+        raise ValueError("samples must be at least 2")
+    edge_indices = torch.arange(layer.out_dim, device=layer.grid.device) * layer.in_dim + feature_index
+    selected_grid = layer.grid[edge_indices]
+    x = torch.linspace(
+        float(selected_grid[:, 0].min().item()),
+        float(selected_grid[:, -1].max().item()),
+        steps=samples,
+        device=layer.grid.device,
+    )
+    x_eval = x.repeat(layer.out_dim, 1)
+    spline_values = _evaluate_hermite_curves(x_eval, selected_grid, layer.coef[edge_indices])
+    base_values = _positive_elu(x_eval)
+    values = (
+        layer.scale_base[edge_indices].unsqueeze(1) * base_values
+        + layer.scale_spline[edge_indices].unsqueeze(1) * spline_values
+    )
+    return x.detach().cpu(), values.detach().cpu()

@@ -92,6 +92,7 @@ def main() -> None:
         feature_stats=feature_stats,
         max_order_factor=max_order_factor,
         scale_action_by_history_mean=scale_action_by_history_mean,
+        clip_imitation_predictions=False,
     )
     if result.best_state_dict is not None:
         model.load_state_dict(result.best_state_dict)

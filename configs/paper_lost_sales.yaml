@@ -34,6 +34,80 @@ monokan:
   max_order_factor: 2.0
   TODO: "Continue tuning MonoKAN width/grid after validating the adapted implementation against the official repository."
 
+positive_weight_mlp:
+  hidden_layers: 2
+  hidden_units: 32
+  activation: ELU
+  monotonic_feature: 0
+  monotonic_direction: -1
+
+constrained_monotone_mlp:
+  hidden_layers: 2
+  hidden_units: 32
+  activation: ELU
+  mixed_activation: true
+  monotonic_feature: 0
+  monotonic_direction: -1
+
+idp_benchmark:
+  seed: 2025
+  hidden_layers: 2
+  hidden_units: 32
+  activation: ELU
+  max_order_factor: 4.0
+  scale_action_by_history_mean: true
+  normalize_reward_loss: true
+  monotonicity_samples_per_product: 2
+  penalty_weights: [0.1, 1.0, 10.0]
+  raw_violation_threshold: 0.01
+  acceptance_reward_gap_tolerance_pct: 0.5
+  compact:
+    training_products: 32
+    validation_products: 8
+    batch_size: 16
+    training_horizon: 20
+    imitation_epochs: 2
+    reward_epochs: 4
+    validation_interval: 1
+    evaluation_horizon: 60
+    burn_in: 0
+    inventory_states: 25
+    structure_products: 3
+    order_up_to_products: 32
+    oracle_mc_samples: 5000
+    penalty_weights: [10.0]
+  full:
+    training_products: 40000
+    validation_products: 100
+    batch_size: 2500
+    training_horizon: 100
+    imitation_epochs: 20
+    reward_epochs: 1000
+    validation_interval: 10
+    evaluation_horizon: 520
+    burn_in: 20
+    inventory_states: 100
+    structure_products: 3
+    order_up_to_products: 1000
+    oracle_mc_samples: 200000
+  paper_replication:
+    training_products: 40000
+    validation_products: 100000
+    batch_size: 2500
+    training_horizon: 100
+    imitation_epochs: 20
+    reward_epochs: 1000
+    validation_interval: 10
+    evaluation_horizon: 520
+    burn_in: 20
+    inventory_states: 100
+    structure_products: 3
+    order_up_to_products: 1000
+    oracle_mc_samples: 200000
+  sample_efficiency:
+    history_windows: [16, 32, 64]
+    training_products_grid: [100, 1000, 10000, 40000]
+
 demand_distribution: Gamma
 
 product_features:
@@ -70,6 +144,7 @@ runtime:
   fcnn_validation_products: 100
   fcnn_train_epochs: 50
   monokan_sweep_train_products: 128
+  monokan_sweep_selection_products: 20
   monokan_sweep_batch_size: 64
   monokan_sweep_horizon: 40
   monokan_sweep_epochs: 8
