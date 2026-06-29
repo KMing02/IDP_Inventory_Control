@@ -35,6 +35,7 @@ from inventory_control.policies.neural.fcnn import (
     PaperFCNNFeatureStats,
     build_paper_lost_sales_features,
     compute_paper_fcnn_feature_stats,
+    infer_model_device,
     make_paper_fcnn_model,
 )
 from inventory_control.policies.neural.constrained_mlp import (
@@ -179,7 +180,13 @@ def _model_orders(
     ]
     model.eval()
     with torch.no_grad():
-        raw = model(torch.tensor(features, dtype=torch.float32)).detach().cpu().numpy().astype(float)
+        raw = (
+            model(torch.tensor(features, dtype=torch.float32, device=infer_model_device(model)))
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(float)
+        )
     historical_mean = max(float(np.mean(product.historical_demand)), 1.0)
     if scale_action_by_history_mean:
         raw = raw * historical_mean
@@ -230,6 +237,7 @@ def _train_model(
     name: str,
     split: str,
     penalty_weight: float = 0.0,
+    clip_imitation_predictions: bool = True,
 ) -> DirectBackpropResult:
     def validation_callback(epoch: int, current_model: nn.Module) -> float:
         del epoch
@@ -261,6 +269,7 @@ def _train_model(
         normalize_reward_loss=bool(settings["normalize_reward_loss"]),
         monotonicity_penalty_weight=float(penalty_weight),
         monotonicity_samples_per_product=int(settings["monotonicity_samples_per_product"]),
+        clip_imitation_predictions=clip_imitation_predictions,
     )
     if result.best_state_dict is not None:
         model.load_state_dict(result.best_state_dict)
@@ -351,6 +360,11 @@ def _prediction_summary(predictions: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for policy_name, policy_rows in predictions.groupby("policy_name", sort=False):
         errors = policy_rows["error"].to_numpy(dtype=float)
+        zero_inventory_rows = policy_rows.loc[policy_rows["state_index"] == 0]
+        order_up_to_errors = (
+            zero_inventory_rows["order_up_to_level"].to_numpy(dtype=float)
+            - zero_inventory_rows["omniscient_order_up_to_level"].to_numpy(dtype=float)
+        )
         raw_violations: list[float] = []
         deployed_violations: list[float] = []
         for _, product_rows in policy_rows.groupby("product_id", sort=False):
@@ -359,36 +373,53 @@ def _prediction_summary(predictions: pd.DataFrame) -> pd.DataFrame:
             deployed_violations.extend(np.diff(ordered["deployed_order"].to_numpy(dtype=float)).tolist())
         raw_increases = np.maximum(np.asarray(raw_violations, dtype=float), 0.0)
         deployed_increases = np.maximum(np.asarray(deployed_violations, dtype=float), 0.0)
+        active_slope_deviation, inactive_slope_deviation = _slope_deviations(policy_rows)
         rows.append(
             {
                 "policy_name": policy_name,
                 "mae": float(np.mean(np.abs(errors))),
                 "rmse": float(np.sqrt(np.mean(errors**2))),
-                "order_up_to_mae": float(np.mean(np.abs(errors))),
-                "order_up_to_rmse": float(np.sqrt(np.mean(errors**2))),
+                "order_up_to_mae": float(np.mean(np.abs(order_up_to_errors))),
+                "order_up_to_rmse": float(np.sqrt(np.mean(order_up_to_errors**2))),
                 "raw_violation_rate": float(np.mean(raw_increases > 1e-6)),
                 "deployed_violation_rate": float(np.mean(deployed_increases > 1e-6)),
                 "raw_max_violation": float(raw_increases.max(initial=0.0)),
                 "deployed_max_violation": float(deployed_increases.max(initial=0.0)),
-                "mean_slope_deviation_from_minus_one": _mean_slope_deviation(policy_rows),
+                "mean_slope_deviation_from_minus_one": active_slope_deviation,
+                "active_slope_deviation_from_minus_one": active_slope_deviation,
+                "inactive_slope_deviation_from_zero": inactive_slope_deviation,
             }
         )
     return pd.DataFrame(rows)
 
 
 def _mean_slope_deviation(policy_rows: pd.DataFrame) -> float:
-    deviations: list[float] = []
+    """Return active-region slope deviation retained for compatibility."""
+    active_deviation, _ = _slope_deviations(policy_rows)
+    return active_deviation
+
+
+def _slope_deviations(policy_rows: pd.DataFrame) -> tuple[float, float]:
+    """Return active-region minus-one and inactive-region zero slope deviations."""
+    active_deviations: list[float] = []
+    inactive_deviations: list[float] = []
     for _, product_rows in policy_rows.groupby("product_id", sort=False):
         ordered = product_rows.sort_values("state_index")
         inventory = ordered["inventory"].to_numpy(dtype=float)
         orders = ordered["deployed_order"].to_numpy(dtype=float)
+        oracle_orders = ordered["oracle_order"].to_numpy(dtype=float)
         if len(inventory) < 2:
             continue
         slopes = np.diff(orders) / np.maximum(np.diff(inventory), 1e-12)
-        active = orders[:-1] > 1e-6
+        active = oracle_orders[:-1] > 1e-6
         if np.any(active):
-            deviations.extend(np.abs(slopes[active] + 1.0).tolist())
-    return float(np.mean(deviations)) if deviations else 0.0
+            active_deviations.extend(np.abs(slopes[active] + 1.0).tolist())
+        inactive = ~active
+        if np.any(inactive):
+            inactive_deviations.extend(np.abs(slopes[inactive]).tolist())
+    active_mean = float(np.mean(active_deviations)) if active_deviations else 0.0
+    inactive_mean = float(np.mean(inactive_deviations)) if inactive_deviations else 0.0
+    return active_mean, inactive_mean
 
 
 def _operational_table(
@@ -604,6 +635,7 @@ def run_idp_benchmark(
             monokan,
             "MonoKAN",
             split,
+            clip_imitation_predictions=False,
         )
         models["PenaltyMLP"] = selected_penalty["model"]
         models["PositiveWeightMLP"] = positive_weight_mlp

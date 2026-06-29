@@ -14,12 +14,26 @@ except ImportError as exc:  # pragma: no cover
 
 from torch import nn
 
-from inventory_control.policies.neural.fcnn import FCNNPolicy, PaperFCNNFeatureStats
+from inventory_control.policies.neural.fcnn import FCNNPolicy, PaperFCNNFeatureStats, infer_model_device
 from inventory_control.paper_lost_sales import non_omniscient_gamma_base_stock_policy
 from inventory_control.products import PaperLostSalesProduct
 
 
 PAPER_FCNN_MAX_ORDER_FACTOR = 2.0
+
+
+def default_torch_device() -> torch.device:
+    """Pick the best available device for neural training."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def move_batch_to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
+    """Move a tensor batch to the selected device."""
+    return {key: value.to(device) for key, value in batch.items()}
 
 
 @dataclass
@@ -33,6 +47,9 @@ class DirectBackpropResult:
     validation_epochs: list[int] | None = None
     best_validation_reward: float | None = None
     best_state_dict: dict[str, torch.Tensor] | None = None
+    best_imitation_loss: float | None = None
+    best_imitation_epoch: int | None = None
+    best_imitation_state_dict: dict[str, torch.Tensor] | None = None
     training_log: list[dict[str, float | int]] | None = None
     monotonicity_penalties: list[float] | None = None
     elapsed_seconds: float = 0.0
@@ -100,14 +117,13 @@ def make_paper_lost_sales_training_batch(
     }
 
 
-def paper_lost_sales_fcnn_order(
+def paper_lost_sales_raw_order(
     model: nn.Module,
     batch: dict[str, torch.Tensor],
     inventory: torch.Tensor,
-    max_order_factor: float = PAPER_FCNN_MAX_ORDER_FACTOR,
     scale_action_by_history_mean: bool = False,
 ) -> torch.Tensor:
-    """Return capped FCNN orders for a batch and inventory vector."""
+    """Return uncapped policy orders for a batch and inventory vector."""
     demand_scale = torch.clamp(batch["feature_demand_scale"], min=1.0)
     price_scale = torch.clamp(batch["feature_price_scale"], min=1.0)
     economics = torch.stack(
@@ -120,11 +136,28 @@ def paper_lost_sales_fcnn_order(
         dim=1,
     )
     features = torch.cat([(inventory / demand_scale).unsqueeze(-1), batch["history"], economics], dim=1)
-    max_inventory_level = float(max_order_factor) * torch.clamp(batch["historical_mean_demand"], min=1.0)
-    order_cap = torch.relu(max_inventory_level - inventory)
     order = model(features)
     if scale_action_by_history_mean:
         order = order * torch.clamp(batch["historical_mean_demand"], min=1.0)
+    return order
+
+
+def paper_lost_sales_fcnn_order(
+    model: nn.Module,
+    batch: dict[str, torch.Tensor],
+    inventory: torch.Tensor,
+    max_order_factor: float = PAPER_FCNN_MAX_ORDER_FACTOR,
+    scale_action_by_history_mean: bool = False,
+) -> torch.Tensor:
+    """Return capped policy orders for a batch and inventory vector."""
+    max_inventory_level = float(max_order_factor) * torch.clamp(batch["historical_mean_demand"], min=1.0)
+    order_cap = torch.relu(max_inventory_level - inventory)
+    order = paper_lost_sales_raw_order(
+        model,
+        batch,
+        inventory,
+        scale_action_by_history_mean=scale_action_by_history_mean,
+    )
     return torch.minimum(order, order_cap)
 
 
@@ -162,8 +195,8 @@ def paper_inventory_monotonicity_penalty(
     max_inventory = float(max_inventory_factor) * torch.clamp(batch["historical_mean_demand"], min=1.0)
     penalties = []
     for _ in range(samples_per_product):
-        first = torch.rand(batch_size, generator=generator)
-        second = torch.rand(batch_size, generator=generator)
+        first = torch.rand(batch_size, generator=generator).to(batch["initial_inventory"].device)
+        second = torch.rand(batch_size, generator=generator).to(batch["initial_inventory"].device)
         inventory_low = torch.minimum(first, second) * max_inventory
         inventory_high = torch.maximum(first, second) * max_inventory
         low_order = model(paper_lost_sales_features(batch, inventory_low))
@@ -234,25 +267,78 @@ def historical_base_stock_imitation_loss(
     samples_per_product: int = 4,
     max_order_factor: float = PAPER_FCNN_MAX_ORDER_FACTOR,
     scale_action_by_history_mean: bool = False,
+    clip_predictions: bool = True,
 ) -> torch.Tensor:
     """Supervised warm-start loss matching historical base-stock actions."""
     batch_size = batch["initial_inventory"].shape[0]
     max_inventory_level = float(max_order_factor) * torch.clamp(batch["historical_mean_demand"], min=1.0)
     repeated_losses = []
     for _ in range(samples_per_product):
-        random_fraction = torch.rand(batch_size, generator=generator)
+        random_fraction = torch.rand(batch_size, generator=generator).to(batch["initial_inventory"].device)
         inventory = random_fraction * max_inventory_level
-        predicted = paper_lost_sales_fcnn_order(
-            model,
-            batch,
-            inventory,
-            max_order_factor=max_order_factor,
-            scale_action_by_history_mean=scale_action_by_history_mean,
-        )
+        if clip_predictions:
+            predicted = paper_lost_sales_fcnn_order(
+                model,
+                batch,
+                inventory,
+                max_order_factor=max_order_factor,
+                scale_action_by_history_mean=scale_action_by_history_mean,
+            )
+        else:
+            predicted = paper_lost_sales_raw_order(
+                model,
+                batch,
+                inventory,
+                scale_action_by_history_mean=scale_action_by_history_mean,
+            )
         target = torch.relu(batch["historical_base_stock_level"] - inventory)
         target = torch.minimum(target, torch.relu(max_inventory_level - inventory))
         repeated_losses.append(torch.mean((predicted - target) ** 2))
     return torch.stack(repeated_losses).mean()
+
+
+@torch.no_grad()
+def paper_order_diagnostics(
+    model: nn.Module,
+    batch: dict[str, torch.Tensor],
+    max_order_factor: float,
+    scale_action_by_history_mean: bool,
+    inventory_fractions: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75),
+) -> dict[str, float]:
+    """Measure raw-order calibration on fixed fractions of the observable cap."""
+    max_inventory = float(max_order_factor) * torch.clamp(batch["historical_mean_demand"], min=1.0)
+    raw_orders = []
+    deployed_orders = []
+    caps = []
+    targets = []
+    for fraction in inventory_fractions:
+        inventory = float(fraction) * max_inventory
+        raw = paper_lost_sales_raw_order(
+            model,
+            batch,
+            inventory,
+            scale_action_by_history_mean=scale_action_by_history_mean,
+        )
+        cap = torch.relu(max_inventory - inventory)
+        target = torch.minimum(torch.relu(batch["historical_base_stock_level"] - inventory), cap)
+        raw_orders.append(raw)
+        deployed_orders.append(torch.minimum(raw, cap))
+        caps.append(cap)
+        targets.append(target)
+    raw = torch.cat(raw_orders)
+    deployed = torch.cat(deployed_orders)
+    cap = torch.cat(caps)
+    target = torch.cat(targets)
+    errors = raw - target
+    return {
+        "raw_order_mean": float(raw.mean().item()),
+        "raw_order_min": float(raw.min().item()),
+        "raw_order_max": float(raw.max().item()),
+        "deployed_order_mean": float(deployed.mean().item()),
+        "cap_hit_rate": float(torch.mean((raw >= cap - 1e-6).float()).item()),
+        "raw_imitation_mae": float(torch.mean(torch.abs(errors)).item()),
+        "raw_imitation_rmse": float(torch.sqrt(torch.mean(errors**2)).item()),
+    }
 
 
 def train_paper_lost_sales_fcnn(
@@ -274,11 +360,15 @@ def train_paper_lost_sales_fcnn(
     monotonicity_penalty_weight: float = 0.0,
     monotonicity_samples_per_product: int = 1,
     include_terminal_salvage: bool = True,
+    clip_imitation_predictions: bool = True,
+    device: torch.device | str | None = None,
 ) -> DirectBackpropResult:
     """Train FCNN with DirectBackprop-style negative reward minimization."""
     torch.manual_seed(seed)
     generator = torch.Generator().manual_seed(seed)
     penalty_generator = torch.Generator().manual_seed(seed + 1_000_003)
+    chosen_device = torch.device(device) if device is not None else default_torch_device()
+    model = model.to(chosen_device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     training_losses: list[float] = []
     mean_total_rewards: list[float] = []
@@ -288,12 +378,18 @@ def train_paper_lost_sales_fcnn(
     monotonicity_penalties: list[float] = []
     best_validation_reward: float | None = None
     best_state_dict: dict[str, torch.Tensor] | None = None
+    best_imitation_loss: float | None = None
+    best_imitation_epoch: int | None = None
+    best_imitation_state_dict: dict[str, torch.Tensor] | None = None
     total_epochs = imitation_epochs + epochs
     start_time = time.perf_counter()
     for epoch in range(total_epochs):
         indices = torch.randint(0, len(products), (batch_size,), generator=generator).tolist()
         batch_products = [products[index] for index in indices]
-        batch = make_paper_lost_sales_training_batch(batch_products, horizon, generator, feature_stats=feature_stats)
+        batch = move_batch_to_device(
+            make_paper_lost_sales_training_batch(batch_products, horizon, generator, feature_stats=feature_stats),
+            infer_model_device(model),
+        )
         if epoch < imitation_epochs:
             mean_total_reward = paper_lost_sales_fcnn_rollout(
                 model,
@@ -308,6 +404,7 @@ def train_paper_lost_sales_fcnn(
                 generator,
                 max_order_factor=max_order_factor,
                 scale_action_by_history_mean=scale_action_by_history_mean,
+                clip_predictions=clip_imitation_predictions,
             )
         else:
             mean_total_reward = paper_lost_sales_fcnn_rollout(
@@ -337,6 +434,18 @@ def train_paper_lost_sales_fcnn(
         optimizer.step()
         if hasattr(model, "apply_monotonic_constraints"):
             model.apply_monotonic_constraints()
+        if epoch < imitation_epochs:
+            current_imitation_loss = float(primary_loss.detach().item())
+            if best_imitation_loss is None or current_imitation_loss < best_imitation_loss:
+                best_imitation_loss = current_imitation_loss
+                best_imitation_epoch = epoch + 1
+                best_imitation_state_dict = copy.deepcopy(model.state_dict())
+        order_diagnostics = paper_order_diagnostics(
+            model,
+            batch,
+            max_order_factor=max_order_factor,
+            scale_action_by_history_mean=scale_action_by_history_mean,
+        )
         training_losses.append(float(loss.detach().item()))
         mean_total_rewards.append(float(mean_total_reward.detach().item()))
         monotonicity_penalties.append(float(monotonicity_penalty.detach().item()))
@@ -349,8 +458,14 @@ def train_paper_lost_sales_fcnn(
             "monotonicity_penalty": float(monotonicity_penalty.detach().item()),
             "monotonicity_penalty_weight": float(monotonicity_penalty_weight),
             "elapsed_seconds": float(time.perf_counter() - start_time),
+            **order_diagnostics,
         }
-        if validation_products and validation_interval and (epoch + 1) % validation_interval == 0:
+        should_validate = bool(
+            validation_products
+            and validation_interval
+            and ((epoch + 1) % validation_interval == 0 or epoch + 1 == total_epochs)
+        )
+        if should_validate:
             if validation_callback is not None:
                 validation_reward = validation_callback(epoch + 1, model)
             else:
@@ -360,6 +475,7 @@ def train_paper_lost_sales_fcnn(
                     generator,
                     feature_stats=feature_stats,
                 )
+                validation_batch = move_batch_to_device(validation_batch, infer_model_device(model))
                 with torch.no_grad():
                     validation_reward_tensor = paper_lost_sales_fcnn_rollout(
                         model,
@@ -385,6 +501,9 @@ def train_paper_lost_sales_fcnn(
         validation_epochs=validation_epochs or None,
         best_validation_reward=best_validation_reward,
         best_state_dict=best_state_dict,
+        best_imitation_loss=best_imitation_loss,
+        best_imitation_epoch=best_imitation_epoch,
+        best_imitation_state_dict=best_imitation_state_dict,
         training_log=training_log,
         monotonicity_penalties=monotonicity_penalties,
         elapsed_seconds=elapsed_seconds,

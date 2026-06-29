@@ -192,6 +192,50 @@ def test_train_paper_lost_sales_fcnn_tracks_best_validation_checkpoint() -> None
     assert result.training_log[-1]["validation_mean_total_reward"] == 2.0
 
 
+def test_training_always_validates_final_epoch() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(4, "train")
+    model = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
+    validated_epochs = []
+
+    result = train_paper_lost_sales_fcnn(
+        products,
+        model,
+        horizon=3,
+        batch_size=2,
+        epochs=3,
+        learning_rate=1e-3,
+        seed=0,
+        imitation_epochs=2,
+        validation_products=products[:2],
+        validation_interval=3,
+        validation_callback=lambda epoch, current_model: validated_epochs.append(epoch) or float(epoch),
+    )
+
+    assert validated_epochs == [3, 5]
+    assert result.validation_epochs == [3, 5]
+    assert result.best_validation_reward == 5.0
+
+
+def test_training_tracks_best_imitation_checkpoint() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(4, "train")
+    model = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
+
+    result = train_paper_lost_sales_fcnn(
+        products,
+        model,
+        horizon=3,
+        batch_size=2,
+        epochs=0,
+        learning_rate=1e-3,
+        seed=0,
+        imitation_epochs=3,
+    )
+
+    assert result.best_imitation_loss is not None
+    assert result.best_imitation_epoch in {1, 2, 3}
+    assert result.best_imitation_state_dict is not None
+
+
 def test_inventory_monotonicity_penalty_has_gradient_for_increasing_policy() -> None:
     products = PaperLostSalesProductGenerator(_paper_config()).generate(2, "train")
     batch = make_paper_lost_sales_training_batch(

@@ -141,6 +141,7 @@ runtime:
   fcnn_validation_products: 2
   fcnn_train_epochs: 2
   monokan_sweep_train_products: 8
+  monokan_sweep_selection_products: 2
   monokan_sweep_batch_size: 4
   monokan_sweep_horizon: 8
   monokan_sweep_epochs: 2

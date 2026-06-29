@@ -26,6 +26,9 @@ def test_prediction_summary_reports_accuracy_and_monotonicity() -> None:
             "inventory": [0.0, 1.0, 2.0],
             "raw_order": [2.0, 3.0, 1.0],
             "deployed_order": [2.0, 2.5, 1.0],
+            "oracle_order": [2.0, 0.0, 0.0],
+            "order_up_to_level": [2.0, 3.5, 3.0],
+            "omniscient_order_up_to_level": [3.0, 3.0, 3.0],
             "error": [0.0, 1.0, -1.0],
         }
     )
@@ -37,6 +40,9 @@ def test_prediction_summary_reports_accuracy_and_monotonicity() -> None:
     assert summary["raw_violation_rate"] == 0.5
     assert summary["raw_max_violation"] == 1.0
     assert summary["deployed_max_violation"] == 0.5
+    assert summary["order_up_to_mae"] == 1.0
+    assert summary["active_slope_deviation_from_minus_one"] == pytest.approx(1.5)
+    assert summary["inactive_slope_deviation_from_zero"] == pytest.approx(1.5)
 
 
 def test_penalty_selection_prefers_compliant_high_reward_candidate() -> None:

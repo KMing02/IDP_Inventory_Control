@@ -9,6 +9,7 @@ from inventory_control.paper_lost_sales import (
     monotonicity_violation_rate,
     non_omniscient_gamma_base_stock_policy,
     omniscient_gamma_base_stock_policy,
+    paper_evaluation_demand_path,
     oracle_gamma_base_stock_policy,
     paper_lost_sales_step,
 )
@@ -119,6 +120,57 @@ def test_paper_style_reward_calculation() -> None:
     assert info["ending_inventory"] == 0
     assert reward == 70 - 8 - 3
     assert "cost" not in info
+
+
+def test_deterministic_rollout_reward_decomposition_is_exact() -> None:
+    product = PaperLostSalesProduct(
+        product_id="deterministic",
+        price=10,
+        purchase_cost=2,
+        holding_cost=1,
+        lost_sale_penalty=5,
+        true_mean_demand=2,
+        true_coefficient_of_variation=0.5,
+        gamma_shape=4,
+        gamma_scale=0.5,
+        demand_distribution_type="Gamma",
+        historical_demand=[2] * 32,
+        initial_inventory=0,
+        future_demand=[3, 1],
+    )
+
+    metrics = evaluate_paper_lost_sales_policy(
+        product,
+        BaseStockOrderPolicy(name="DeterministicBaseStock", S=3),
+        horizon=2,
+        n_episodes=1,
+        seed=17,
+    )
+
+    assert metrics["mean_sales_revenue"] == 20
+    assert metrics["mean_purchase_cost"] == 6
+    assert metrics["mean_holding_cost"] == 1
+    assert metrics["mean_lost_sales_penalty"] == 0
+    assert metrics["mean_total_reward"] == 26
+    assert metrics["mean_total_reward"] == pytest.approx(
+        2
+        * (
+            metrics["mean_sales_revenue"]
+            - metrics["mean_purchase_cost"]
+            - metrics["mean_holding_cost"]
+            - metrics["mean_lost_sales_penalty"]
+        )
+    )
+
+
+def test_same_product_and_evaluation_seed_use_identical_demand_path() -> None:
+    product = PaperLostSalesProductGenerator(_paper_table_config()).generate(1, "validation")[0]
+
+    historical_policy_path = paper_evaluation_demand_path(product, horizon=12, seed=123)
+    oracle_policy_path = paper_evaluation_demand_path(product, horizon=12, seed=123)
+
+    np.testing.assert_array_equal(historical_policy_path, oracle_policy_path)
+    np.testing.assert_array_equal(historical_policy_path[:10], product.future_demand[:10])
 
 
 def test_oracle_baseline_uses_true_gamma_parameters() -> None:

@@ -20,6 +20,26 @@ class ScalarOrderPolicy(Protocol):
         """Return order quantity."""
 
 
+def paper_evaluation_demand_path(
+    product: PaperLostSalesProduct,
+    horizon: int,
+    seed: int,
+) -> np.ndarray:
+    """Return the reproducible demand path used for one evaluation episode."""
+    rng = np.random.default_rng(seed)
+    return _paper_evaluation_demand_path(product, horizon, rng)
+
+
+def _paper_evaluation_demand_path(
+    product: PaperLostSalesProduct,
+    horizon: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    if product.future_demand is not None and len(product.future_demand) >= horizon:
+        return np.asarray(product.future_demand[:horizon], dtype=float)
+    return np.asarray(product.sample_demand(rng, size=horizon), dtype=float)
+
+
 def paper_lost_sales_step(
     inventory: float,
     order_quantity: float,
@@ -86,10 +106,7 @@ def evaluate_paper_lost_sales_policy(
     for _ in range(n_episodes):
         inventory = float(product.initial_inventory)
         episode_reward = 0.0
-        if product.future_demand is not None and len(product.future_demand) >= horizon:
-            demands = np.asarray(product.future_demand[:horizon], dtype=float)
-        else:
-            demands = product.sample_demand(rng, size=horizon)
+        demands = _paper_evaluation_demand_path(product, horizon, rng)
         for t, demand in enumerate(demands):
             order = policy.act(inventory, t, rng=rng)
             inventory, reward, info = paper_lost_sales_step(
