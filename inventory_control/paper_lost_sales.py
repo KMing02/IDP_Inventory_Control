@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from statistics import NormalDist
 from typing import Protocol
 
 import numpy as np
+from scipy.stats import gamma as scipy_gamma
 
 from inventory_control.products import PaperLostSalesProduct
 
@@ -18,6 +18,26 @@ class ScalarOrderPolicy(Protocol):
 
     def act(self, inventory: float, t: int, rng=None) -> float:
         """Return order quantity."""
+
+
+def paper_evaluation_demand_path(
+    product: PaperLostSalesProduct,
+    horizon: int,
+    seed: int,
+) -> np.ndarray:
+    """Return the reproducible demand path used for one evaluation episode."""
+    rng = np.random.default_rng(seed)
+    return _paper_evaluation_demand_path(product, horizon, rng)
+
+
+def _paper_evaluation_demand_path(
+    product: PaperLostSalesProduct,
+    horizon: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    if product.future_demand is not None and len(product.future_demand) >= horizon:
+        return np.asarray(product.future_demand[:horizon], dtype=float)
+    return np.asarray(product.sample_demand(rng, size=horizon), dtype=float)
 
 
 def paper_lost_sales_step(
@@ -63,7 +83,12 @@ def evaluate_paper_lost_sales_policy(
     seed: int,
     burn_in: int = 0,
 ) -> dict[str, float]:
-    """Evaluate a scalar-order policy under hidden true Gamma demand."""
+    """Evaluate a scalar-order policy over ``horizon`` total periods.
+
+    Periods before ``burn_in`` are simulated but excluded from reported rewards
+    and aggregate statistics, matching the paper's 520-period evaluation with
+    the first 20 periods discarded.
+    """
     rng = np.random.default_rng(seed)
     total_rewards: list[float] = []
     total_sales = 0.0
@@ -81,10 +106,7 @@ def evaluate_paper_lost_sales_policy(
     for _ in range(n_episodes):
         inventory = float(product.initial_inventory)
         episode_reward = 0.0
-        if product.future_demand is not None and len(product.future_demand) >= horizon + burn_in:
-            demands = np.asarray(product.future_demand[: horizon + burn_in], dtype=float)
-        else:
-            demands = product.sample_demand(rng, size=horizon + burn_in)
+        demands = _paper_evaluation_demand_path(product, horizon, rng)
         for t, demand in enumerate(demands):
             order = policy.act(inventory, t, rng=rng)
             inventory, reward, info = paper_lost_sales_step(
@@ -114,7 +136,7 @@ def evaluate_paper_lost_sales_policy(
     denominator = max(counted_periods, 1)
     return {
         "mean_total_reward": float(np.mean(total_rewards)),
-        "mean_reward_per_period": float(np.mean(total_rewards) / horizon),
+        "mean_reward_per_period": float(np.mean(total_rewards) / max(horizon - burn_in, 1)),
         "service_level": float(total_sales / total_demand) if total_demand > 0 else 1.0,
         "lost_sales_rate": float(total_lost_sales / total_demand) if total_demand > 0 else 0.0,
         "mean_order_quantity": float(total_order_quantity / denominator),
@@ -159,6 +181,13 @@ def gamma_quantile_monte_carlo(
     return float(np.quantile(samples, quantile))
 
 
+def gamma_quantile_exact(shape: float, scale: float, quantile: float) -> float:
+    """Return the exact Gamma quantile used by the paper baselines."""
+    if shape <= 0 or scale <= 0:
+        return 0.0
+    return float(scipy_gamma.ppf(float(np.clip(quantile, 0.0, 1.0)), a=float(shape), scale=float(scale)))
+
+
 def historical_empirical_quantile(product: PaperLostSalesProduct, quantile: float) -> float:
     """Estimate demand quantile from historical demand only."""
     return float(np.quantile(product.historical_demand, quantile))
@@ -174,10 +203,20 @@ def historical_gamma_quantile(product: PaperLostSalesProduct, quantile: float) -
     cv = max(std / mean, 1e-6)
     shape = 1.0 / (cv**2)
     scale = mean / shape
-    # Wilson-Hilferty approximation for Gamma quantile avoids a SciPy dependency.
-    z = NormalDist().inv_cdf(float(np.clip(quantile, 1e-6, 1 - 1e-6)))
-    approx = shape * (1 - 1 / (9 * shape) + z / (3 * np.sqrt(shape))) ** 3
-    return float(max(approx * scale, 0.0))
+    return gamma_quantile_exact(shape, scale, quantile)
+
+
+def omniscient_gamma_base_stock_policy(product: PaperLostSalesProduct) -> BaseStockOrderPolicy:
+    """Create the paper's omniscient optimal LS policy from true Gamma parameters."""
+    quantile = paper_critical_quantile(product)
+    stock_level = gamma_quantile_exact(product.gamma_shape, product.gamma_scale, quantile)
+    return BaseStockOrderPolicy(S=stock_level, name="OmniscientOptimal")
+
+
+def non_omniscient_gamma_base_stock_policy(product: PaperLostSalesProduct) -> BaseStockOrderPolicy:
+    """Create the paper's non-omniscient Gamma fit base-stock benchmark."""
+    quantile = paper_critical_quantile(product)
+    return BaseStockOrderPolicy(S=historical_gamma_quantile(product, quantile), name="NonOmniscientOptimal")
 
 
 def oracle_gamma_base_stock_policy(
@@ -185,10 +224,10 @@ def oracle_gamma_base_stock_policy(
     n_samples: int,
     seed: int,
 ) -> BaseStockOrderPolicy:
-    """Create oracle base-stock policy using true hidden Gamma parameters."""
-    quantile = paper_critical_quantile(product)
-    stock_level = gamma_quantile_monte_carlo(product, quantile, n_samples=n_samples, seed=seed)
-    return BaseStockOrderPolicy(S=stock_level, name="OracleGammaBaseStock")
+    """Backward-compatible alias for the exact omniscient Gamma policy."""
+    del n_samples, seed
+    policy = omniscient_gamma_base_stock_policy(product)
+    return BaseStockOrderPolicy(S=policy.S, name="OracleGammaBaseStock")
 
 
 def historical_demand_base_stock_policy(
@@ -202,7 +241,8 @@ def historical_demand_base_stock_policy(
         if fit_gamma
         else historical_empirical_quantile(product, quantile)
     )
-    return BaseStockOrderPolicy(S=stock_level, name="HistoricalDemandBaseStock")
+    name = "NonOmniscientOptimal" if fit_gamma else "HistoricalDemandBaseStock"
+    return BaseStockOrderPolicy(S=stock_level, name=name)
 
 
 def monotonicity_violation_rate(

@@ -72,6 +72,7 @@ runtime:
   monokan_train_products: 3000
   monokan_train_epochs: 250
   monokan_sweep_train_products: 1000
+  monokan_sweep_selection_products: 100
   monokan_sweep_batch_size: 512
   monokan_sweep_horizon: 100
   monokan_sweep_epochs: 50

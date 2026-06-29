@@ -20,9 +20,9 @@ Current status:
 Current limitations:
 
 - Paper lost-sales product generation follows Table 1 of Maggiar et al. for the synthetic LS setting, and the FCNN path uses the current paper-style observable feature pipeline.
-- `OracleGammaBaseStock` is an oracle critical-quantile base-stock benchmark, not a globally optimal dynamic policy.
+- `OmniscientOptimal` is the exact Gamma critical-quantile base-stock benchmark and uses hidden true demand parameters.
 - Differentiable training is validated for the FCNN path; the adapted MonoKAN module is implemented and unit-tested but has not yet been fully benchmarked.
-- MonoMLP, multi-echelon, perishability, and procurement-removal settings are not implemented yet.
+- Multi-echelon, perishability, and procurement-removal settings are not implemented yet.
 - Generated outputs and model checkpoints are intentionally ignored by Git and are not required for tests.
 
 ## Setup
@@ -209,8 +209,9 @@ outputs/results/paper_lost_sales_baselines_validation.csv
 
 The two explicit baselines are:
 
-- `OracleGammaBaseStock`: uses hidden true Gamma parameters and is an oracle.
-- `HistoricalDemandBaseStock`: uses only historical demand observations and is non-omniscient.
+- `OmniscientOptimal`: uses hidden true Gamma parameters and is an oracle.
+- `NonOmniscientOptimal`: fits Gamma parameters from historical demand observations only.
+- `HistoricalDemandBaseStock`: empirical historical quantile diagnostic, not the primary paper baseline.
 
 Train the paper-style FCNN:
 
@@ -353,6 +354,66 @@ outputs/results/paper_lost_sales_policy_comparison_summary_validation.csv
 outputs/results/paper_lost_sales_fcnn_worst_cases_validation.csv
 ```
 
+## IDP Monotonic Architecture Benchmark
+
+The IDP benchmark is LS-first and paper-aligned. It starts with the no-lead-time
+lost-sales setting from Maggiar et al. before considering any extensions.
+
+- `PaperFCNN`: the causal-CNN plus MLP architecture from the paper.
+- `MonoKAN`: a Hermite-spline architecture with nonincreasing inventory response enforced by construction.
+- `ConstrainedMonoMLP`: a C-MNN-style constrained monotone MLP with mixed monotone activations.
+- `PositiveWeightMLP`: a simpler positive-weight monotone MLP used as an expressiveness control.
+- `PenaltyMLP`: an optional penalty-based reference, not the primary method.
+- `NonOmniscientOptimal`: Gamma method-of-moments base-stock benchmark using historical demand.
+- `OmniscientOptimal`: exact Gamma critical-quantile base-stock benchmark using hidden parameters.
+
+Run the deterministic compact benchmark:
+
+```bash
+python scripts/run_idp_benchmark.py --mode structure-ls --profile compact
+```
+
+Run the paper replication baseline:
+
+```bash
+python scripts/run_idp_benchmark.py --mode replicate-ls --profile paper_replication
+```
+
+The held-out test split remains protected:
+
+```bash
+python scripts/run_idp_benchmark.py --mode structure-ls --profile paper_replication --split test --final-test
+```
+
+Artifacts are written under `outputs/idp_benchmark/<mode>_<profile>_<split>/`:
+
+```text
+summary.csv
+paper_table3_replication.csv
+operational_metrics.csv
+predictions.csv
+training_log.csv
+monokan_splines.csv
+metadata.json
+models/
+plots/
+```
+
+The primary report is `paper_table3_replication.csv`, which gives average
+reward and gap to the omniscient optimal benchmark. Structural artifacts include
+policy curves, order-up-to scatter plots, violation rates, slope diagnostics,
+MonoKAN spline samples, and constrained-MLP architecture comparisons.
+Perishability, multi-echelon, and real-world data are intentionally out of scope
+until the LS replication is credible.
+
+Open `notebooks/idp_monotonic_inventory_control.ipynb` for the visual analysis.
+Its default `PROFILE="auto"` loads full validation artifacts when present and
+otherwise runs and caches the compact benchmark. Execute it non-interactively:
+
+```bash
+python -m jupyter nbconvert --to notebook --execute notebooks/idp_monotonic_inventory_control.ipynb --output idp_monotonic_inventory_control_executed.ipynb --output-dir outputs
+```
+
 ## Run Original Baselines
 
 ```bash
@@ -443,7 +504,7 @@ The first neural path is a minimal zero-lead-time PyTorch setup:
 python scripts/train_zero_lead_time_mlp.py
 ```
 
-It trains an unconstrained MLP through a differentiable zero-lead-time simulator, then evaluates the trained policy on the true discrete simulator. This is only the first DirectBackprop-style smoke path; monotone MLP and MonoKAN policies are still future work.
+It trains an unconstrained MLP through a differentiable zero-lead-time simulator, then evaluates the trained policy on the true discrete simulator. The paper-style IDP benchmark above contains the soft-penalty MLP and strict MonoKAN comparison.
 
 ## Train Product-Level Lead-Time MLP
 
@@ -461,7 +522,7 @@ This is the first product-level neural generalization path. It is intentionally 
 
 ## Research Direction
 
-The benchmark is designed for later neural policy experiments inspired by recent neural inventory-control work on Deep Inventory Management, dual-sourcing neural controllers, and structure-informed DRL. The next stage is to add differentiable policy optimization and compare unconstrained and monotone neural architectures against the heuristic baselines implemented here.
+The benchmark supports differentiable policy optimization and a controlled comparison of unconstrained, soft-penalty, and architecturally monotone policies. Later extensions can apply the same comparison to lead-time, dual-sourcing, multi-echelon, and perishable settings.
 
 ## License
 

@@ -20,7 +20,8 @@ from inventory_control.paper_evaluation import (
 from inventory_control.paper_lost_sales import (
     evaluate_paper_lost_sales_policy,
     historical_demand_base_stock_policy,
-    oracle_gamma_base_stock_policy,
+    non_omniscient_gamma_base_stock_policy,
+    omniscient_gamma_base_stock_policy,
 )
 from inventory_control.products import PaperLostSalesProductGenerator
 
@@ -41,11 +42,8 @@ def main() -> None:
     rows = []
     for index, product in enumerate(products):
         policies = [
-            oracle_gamma_base_stock_policy(
-                product,
-                n_samples=int(config["tuning"]["oracle_mc_samples"]),
-                seed=10_000 + index,
-            ),
+            omniscient_gamma_base_stock_policy(product),
+            non_omniscient_gamma_base_stock_policy(product),
             historical_demand_base_stock_policy(product, fit_gamma=False),
         ]
         for policy in policies:

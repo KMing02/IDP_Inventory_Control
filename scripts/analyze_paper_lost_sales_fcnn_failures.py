@@ -64,8 +64,8 @@ def _comparison_summary(results: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
     pivot = results.pivot(index="product_id", columns="policy_name", values="mean_total_reward")
-    fcnn_beats_historical = float((pivot["FCNN"] > pivot["HistoricalDemandBaseStock"]).mean())
-    fcnn_beats_oracle = float((pivot["FCNN"] > pivot["OracleGammaBaseStock"]).mean())
+    fcnn_beats_historical = float((pivot["FCNN"] > pivot["NonOmniscientOptimal"]).mean())
+    fcnn_beats_oracle = float((pivot["FCNN"] > pivot["OmniscientOptimal"]).mean())
     summary["pct_products_fcnn_beats_historical"] = np.nan
     summary["pct_products_fcnn_beats_oracle"] = np.nan
     fcnn_row = summary["policy_name"] == "FCNN"
@@ -99,15 +99,15 @@ def _worst_cases(results: pd.DataFrame, config: dict, split: str) -> pd.DataFram
     pivot = pivot.rename(
         columns={
             "FCNN": "fcnn_mean_total_reward",
-            "HistoricalDemandBaseStock": "historical_mean_total_reward",
-            "OracleGammaBaseStock": "oracle_mean_total_reward",
+            "NonOmniscientOptimal": "historical_mean_total_reward",
+            "OmniscientOptimal": "oracle_mean_total_reward",
         }
     )
     order_stats = {}
     for policy_name, prefix in [
         ("FCNN", "fcnn"),
-        ("HistoricalDemandBaseStock", "historical"),
-        ("OracleGammaBaseStock", "oracle"),
+        ("NonOmniscientOptimal", "historical"),
+        ("OmniscientOptimal", "oracle"),
     ]:
         columns = [
             "product_id",
@@ -139,7 +139,7 @@ def main() -> None:
 
     config = load_paper_lost_sales_config()
     results = _load_policy_results(args.split)
-    required = {"FCNN", "HistoricalDemandBaseStock", "OracleGammaBaseStock"}
+    required = {"FCNN", "NonOmniscientOptimal", "OmniscientOptimal"}
     observed = set(results["policy_name"])
     if not required.issubset(observed):
         raise ValueError(f"Missing required policies: {sorted(required - observed)}")

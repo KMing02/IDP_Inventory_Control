@@ -18,7 +18,7 @@ from inventory_control.paper_lost_sales import evaluate_paper_lost_sales_policy,
 from inventory_control.policies.neural.fcnn import compute_paper_fcnn_feature_stats
 from inventory_control.policies.neural.monokan import PaperMonoKANPolicyAdapter, make_paper_monokan_model
 from inventory_control.products import PaperLostSalesProductGenerator
-from inventory_control.training.direct_backprop import default_torch_device, train_paper_lost_sales_fcnn
+from inventory_control.training.direct_backprop import train_paper_lost_sales_fcnn
 
 
 def main() -> None:
@@ -41,9 +41,8 @@ def main() -> None:
     scale_action_by_history_mean = bool(
         monokan_config.get("scale_action_by_history_mean", config["fcnn"].get("scale_action_by_history_mean", False))
     )
-    device = default_torch_device()
     torch.manual_seed(int(config["product_generation"]["seed"]))
-    model = make_paper_monokan_model(config).to(device)
+    model = make_paper_monokan_model(config)
 
     baseline_rewards = [
         evaluate_paper_lost_sales_policy(
@@ -93,7 +92,7 @@ def main() -> None:
         feature_stats=feature_stats,
         max_order_factor=max_order_factor,
         scale_action_by_history_mean=scale_action_by_history_mean,
-        device=device,
+        clip_imitation_predictions=False,
     )
     if result.best_state_dict is not None:
         model.load_state_dict(result.best_state_dict)
@@ -128,7 +127,6 @@ def main() -> None:
 
     print(f"initial_training_loss={result.training_losses[0]:.4f}")
     print(f"final_training_loss={result.training_losses[-1]:.4f}")
-    print(f"device={device}")
     if result.best_validation_reward is not None:
         print(f"best_validation_mean_total_reward={result.best_validation_reward:.4f}")
     print(f"validation_historical_mean_total_reward={baseline_mean:.4f}")

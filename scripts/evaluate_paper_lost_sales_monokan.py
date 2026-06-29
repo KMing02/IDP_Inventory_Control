@@ -20,10 +20,8 @@ from inventory_control.paper_evaluation import (
 )
 from inventory_control.paper_lost_sales import evaluate_paper_lost_sales_policy, historical_demand_base_stock_policy
 from inventory_control.policies.neural.fcnn import PaperFCNNFeatureStats, compute_paper_fcnn_feature_stats
-from inventory_control.policies.neural.fcnn import infer_model_device
 from inventory_control.policies.neural.monokan import PaperMonoKANPolicyAdapter, make_paper_monokan_model
 from inventory_control.products import PaperLostSalesProductGenerator
-from inventory_control.training.direct_backprop import default_torch_device
 
 
 def main() -> None:
@@ -38,9 +36,8 @@ def main() -> None:
     model_path = Path("outputs/models/paper_lost_sales_monokan.pt")
     metadata_path = Path("outputs/models/paper_lost_sales_monokan_metadata.json")
     metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
-    device = default_torch_device()
-    model = make_paper_monokan_model(config, metadata=metadata).to(device)
-    model.load_state_dict(torch.load(model_path, weights_only=True, map_location=device))
+    model = make_paper_monokan_model(config, metadata=metadata)
+    model.load_state_dict(torch.load(model_path, weights_only=True))
 
     generator = PaperLostSalesProductGenerator(config)
     n_training_products = min(int(config["training_products"]), int(config["runtime"]["fcnn_train_products"]))
@@ -120,7 +117,6 @@ def main() -> None:
         .mean()
         .to_string()
     )
-    print(f"device={infer_model_device(model)}")
     print(f"saved_results={output_path}")
 
 
