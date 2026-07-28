@@ -15,7 +15,9 @@ from inventory_control.training.direct_backprop import train_paper_lost_sales_fc
 from inventory_control.training.direct_backprop import (
     historical_base_stock_imitation_loss,
     make_paper_lost_sales_training_batch,
+    paper_lost_sales_fcnn_order,
     paper_lost_sales_raw_order,
+    paper_order_diagnostics,
 )
 from tests.test_paper_lost_sales import _paper_config
 
@@ -51,6 +53,55 @@ def test_deep_monokan_initial_orders_are_below_shared_cap() -> None:
     cap = 4.0 * batch["historical_mean_demand"]
 
     assert torch.mean((raw_order >= cap).float()).item() < 0.5
+
+
+def test_paper_monokan_initial_order_stays_within_configured_bound() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(4, "train")
+    feature_stats = compute_paper_fcnn_feature_stats(products)
+    config = {**_paper_config(), "monokan": {"max_order_factor": 2.0}}
+    model = make_paper_monokan_model(config)
+    batch = make_paper_lost_sales_training_batch(
+        products,
+        horizon=3,
+        generator=torch.Generator().manual_seed(0),
+        feature_stats=feature_stats,
+    )
+    inventory = torch.zeros(len(products))
+
+    raw_order = paper_lost_sales_raw_order(
+        model,
+        batch,
+        inventory,
+        scale_action_by_history_mean=True,
+    )
+    physical_bound = 2.0 * torch.clamp(batch["historical_mean_demand"], min=1.0)
+
+    assert torch.all(raw_order >= 0)
+    assert torch.all(raw_order <= physical_bound + 1e-6)
+
+
+def test_paper_monokan_raw_orders_are_problem_scaled_before_deployment_cap() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(4, "train")
+    feature_stats = compute_paper_fcnn_feature_stats(products)
+    config = {**_paper_config(), "monokan": {"max_order_factor": 2.0}}
+    model = make_paper_monokan_model(config)
+    batch = make_paper_lost_sales_training_batch(
+        products,
+        horizon=3,
+        generator=torch.Generator().manual_seed(0),
+        feature_stats=feature_stats,
+    )
+    inventory = torch.zeros(len(products))
+
+    raw_order = paper_lost_sales_raw_order(
+        model,
+        batch,
+        inventory,
+        scale_action_by_history_mean=True,
+    )
+    physical_bound = 2.0 * torch.clamp(batch["historical_mean_demand"], min=1.0)
+
+    assert torch.all(raw_order <= physical_bound + 1e-6)
 
 
 def test_raw_imitation_retains_gradient_above_deployment_cap() -> None:
@@ -128,7 +179,22 @@ def test_monokan_training_reapplies_monotonic_projection() -> None:
 def test_monokan_raw_imitation_improves_calibration_and_logs_diagnostics() -> None:
     products = PaperLostSalesProductGenerator(_paper_config()).generate(1, "train")
     feature_stats = compute_paper_fcnn_feature_stats(products)
+    torch.manual_seed(0)
     model = MonoKANPolicy(input_dim=37, hidden_layers=1, hidden_units=4, grid=3, monotonic_vars={0: -1})
+    diagnostic_batch = make_paper_lost_sales_training_batch(
+        products,
+        horizon=3,
+        generator=torch.Generator().manual_seed(123),
+        feature_stats=feature_stats,
+    )
+    inventory_fractions = tuple(index / 32 for index in range(33))
+    pre_training_rmse = paper_order_diagnostics(
+        model,
+        diagnostic_batch,
+        max_order_factor=4.0,
+        scale_action_by_history_mean=True,
+        inventory_fractions=inventory_fractions,
+    )["raw_imitation_rmse"]
 
     result = train_paper_lost_sales_fcnn(
         products,
@@ -138,15 +204,22 @@ def test_monokan_raw_imitation_improves_calibration_and_logs_diagnostics() -> No
         epochs=0,
         learning_rate=1e-3,
         seed=0,
-        imitation_epochs=5,
+        imitation_epochs=20,
         feature_stats=feature_stats,
         max_order_factor=4.0,
         scale_action_by_history_mean=True,
         clip_imitation_predictions=False,
     )
+    post_training_rmse = paper_order_diagnostics(
+        result.model,
+        diagnostic_batch,
+        max_order_factor=4.0,
+        scale_action_by_history_mean=True,
+        inventory_fractions=inventory_fractions,
+    )["raw_imitation_rmse"]
 
     assert result.training_log is not None
-    assert result.training_log[-1]["raw_imitation_rmse"] < result.training_log[0]["raw_imitation_rmse"]
+    assert post_training_rmse < pre_training_rmse
     assert {
         "raw_order_mean",
         "raw_order_min",
@@ -167,6 +240,40 @@ def test_paper_monokan_adapter_matches_action_cap() -> None:
     order = adapter.act(inventory=max(product.historical_demand) + 100, t=0)
 
     assert order == 0.0
+
+
+def test_paper_monokan_training_and_evaluation_use_same_scaled_action_path() -> None:
+    product = PaperLostSalesProductGenerator(_paper_config()).generate(1, "test")[0]
+    feature_stats = compute_paper_fcnn_feature_stats([product])
+    config = {**_paper_config(), "monokan": {"max_order_factor": 2.0}}
+    model = make_paper_monokan_model(config)
+    adapter = PaperMonoKANPolicyAdapter(
+        model,
+        product,
+        feature_stats=feature_stats,
+        max_order_factor=2.0,
+        scale_action_by_history_mean=True,
+    )
+    batch = make_paper_lost_sales_training_batch(
+        [product],
+        horizon=1,
+        generator=torch.Generator().manual_seed(0),
+        feature_stats=feature_stats,
+    )
+    inventory = torch.tensor([float(product.initial_inventory)])
+
+    training_order = float(
+        paper_lost_sales_fcnn_order(
+            model,
+            batch,
+            inventory,
+            max_order_factor=2.0,
+            scale_action_by_history_mean=True,
+        ).item()
+    )
+    evaluation_order = adapter.act(float(product.initial_inventory), t=0)
+
+    assert training_order == pytest.approx(evaluation_order)
 
 
 def test_monokan_is_monotone_outside_spline_knots() -> None:

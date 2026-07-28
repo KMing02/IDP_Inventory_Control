@@ -166,9 +166,13 @@ class MonoKANPolicy(nn.Module):
         grid_range: tuple[float, float] = (-2.0, 4.0),
         monotonic_vars: dict[int, int] | None = None,
         initial_normalized_order: float = 0.5,
+        output_upper_bound: float | None = None,
     ) -> None:
         super().__init__()
         self.monotonic_vars = dict(monotonic_vars or {})
+        self.output_upper_bound = float(output_upper_bound) if output_upper_bound is not None else None
+        if self.output_upper_bound is not None and self.output_upper_bound <= 0:
+            raise ValueError("output_upper_bound must be positive")
         widths = [int(input_dim)] + [int(hidden_units)] * int(hidden_layers) + [1]
         self.layers = nn.ModuleList(
             [
@@ -176,14 +180,26 @@ class MonoKANPolicy(nn.Module):
                 for index in range(len(widths) - 1)
             ]
         )
+        if self.output_upper_bound is not None:
+            self._initialize_bounded_layers()
         self.apply_monotonic_constraints()
         self._calibrate_initial_output(float(initial_normalized_order))
+
+    @torch.no_grad()
+    def _initialize_bounded_layers(self) -> None:
+        """Use expressive spline scales when the paper action bound controls output scale."""
+        for layer in self.layers:
+            layer.coef[:, :, 1].fill_(1.0)
+            layer.scale_base.copy_(torch.ones_like(layer.scale_base) / max(layer.in_dim, 1) ** 0.5)
+            layer.scale_spline.fill_(1.0)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """Return non-negative normalized order quantity."""
         x = features
         for layer in self.layers:
             x = layer(x)
+        if self.output_upper_bound is not None:
+            return (self.output_upper_bound * torch.sigmoid(x)).squeeze(-1)
         return torch.nn.functional.softplus(x).squeeze(-1)
 
     @torch.no_grad()
@@ -191,13 +207,21 @@ class MonoKANPolicy(nn.Module):
         """Set the final bias to a stable normalized order at a reference input."""
         if target_order <= 0:
             raise ValueError("initial_normalized_order must be positive")
-        reference = torch.ones(1, self.layers[0].in_dim, device=self.layers[0].bias.device)
-        reference[:, 0] = 0.0
+        if self.output_upper_bound is not None:
+            target_order = min(target_order, self.output_upper_bound - 1e-6)
+            if target_order <= 0:
+                raise ValueError("initial_normalized_order must be below output_upper_bound")
+        reference = torch.zeros(1, self.layers[0].in_dim, device=self.layers[0].bias.device)
         x = reference
         for layer in self.layers:
             x = layer(x)
-        target_pre_softplus = torch.log(torch.expm1(torch.tensor(target_order, device=x.device)))
-        self.layers[-1].bias.add_(target_pre_softplus - x.squeeze())
+        if self.output_upper_bound is None:
+            target_pre_activation = torch.log(torch.expm1(torch.tensor(target_order, device=x.device)))
+        else:
+            target_fraction = torch.tensor(target_order / self.output_upper_bound, device=x.device)
+            target_fraction = torch.clamp(target_fraction, min=1e-6, max=1 - 1e-6)
+            target_pre_activation = torch.logit(target_fraction)
+        self.layers[-1].bias.add_(target_pre_activation - x.squeeze())
 
     @torch.no_grad()
     def apply_monotonic_constraints(self) -> None:
@@ -287,6 +311,12 @@ def make_paper_monokan_model(config: dict, metadata: dict | None = None) -> Mono
     """Build the configured paper MonoKAN policy model."""
     source = metadata or config.get("monokan", {})
     history_length = int(source.get("history_length_H", config["history_length_H"]))
+    max_order_factor = float(
+        source.get(
+            "max_order_factor",
+            config.get("monokan", {}).get("max_order_factor", config.get("fcnn", {}).get("max_order_factor", 2.0)),
+        )
+    )
     return MonoKANPolicy(
         input_dim=1 + history_length + 4,
         hidden_layers=int(source.get("hidden_layers", config.get("monokan", {}).get("hidden_layers", 1))),
@@ -294,6 +324,8 @@ def make_paper_monokan_model(config: dict, metadata: dict | None = None) -> Mono
         grid=int(source.get("grid", config.get("monokan", {}).get("grid", 5))),
         grid_range=tuple(source.get("grid_range", config.get("monokan", {}).get("grid_range", [-2.0, 4.0]))),
         monotonic_vars={0: -1},
+        initial_normalized_order=float(source.get("initial_normalized_order", 0.5 * max_order_factor)),
+        output_upper_bound=max_order_factor,
     )
 
 

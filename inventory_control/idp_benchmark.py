@@ -138,8 +138,10 @@ def _model_config(config: dict[str, Any], settings: dict[str, Any]) -> dict[str,
             **config.get("monokan", {}),
             "hidden_layers": int(settings["hidden_layers"]),
             "hidden_units": int(settings["hidden_units"]),
-            "max_order_factor": float(settings["max_order_factor"]),
-            "scale_action_by_history_mean": bool(settings["scale_action_by_history_mean"]),
+            "max_order_factor": float(config.get("monokan", {}).get("max_order_factor", settings["max_order_factor"])),
+            "scale_action_by_history_mean": bool(
+                config.get("monokan", {}).get("scale_action_by_history_mean", settings["scale_action_by_history_mean"])
+            ),
         },
         "positive_weight_mlp": {
             **config.get("positive_weight_mlp", {}),
@@ -294,6 +296,7 @@ def _prediction_table(
     feature_stats: PaperFCNNFeatureStats,
     settings: dict[str, Any],
     oracle_levels: dict[str, float],
+    model_action_settings: dict[str, dict[str, Any]] | None = None,
 ) -> pd.DataFrame:
     rows: list[dict[str, float | str | int]] = []
     for product in products:
@@ -324,13 +327,14 @@ def _prediction_table(
             ),
         }
         for name, model in models.items():
+            action_settings = (model_action_settings or {}).get(name, settings)
             policy_orders[name] = _model_orders(
                 model,
                 product,
                 feature_stats,
                 inventories,
-                float(settings["max_order_factor"]),
-                bool(settings["scale_action_by_history_mean"]),
+                float(action_settings["max_order_factor"]),
+                bool(action_settings["scale_action_by_history_mean"]),
             )
         for policy_name, (raw_orders, deployed_orders) in policy_orders.items():
             for state_index, inventory in enumerate(inventories):
@@ -429,6 +433,7 @@ def _operational_table(
     settings: dict[str, Any],
     oracle_levels: dict[str, float],
     split: str,
+    model_action_settings: dict[str, dict[str, Any]] | None = None,
 ) -> pd.DataFrame:
     rows = []
     seed_start = paper_evaluation_seed_start(split)
@@ -447,8 +452,8 @@ def _operational_table(
                 model,
                 product,
                 feature_stats,
-                float(settings["max_order_factor"]),
-                bool(settings["scale_action_by_history_mean"]),
+                float((model_action_settings or {}).get(name, settings)["max_order_factor"]),
+                bool((model_action_settings or {}).get(name, settings)["scale_action_by_history_mean"]),
             )
             for name, model in models.items()
         )
@@ -532,6 +537,7 @@ def run_idp_benchmark(
         int(settings["seed"]) + 10_000,
     )
     models: dict[str, nn.Module] = {"PaperFCNN": paper_fcnn}
+    model_action_settings: dict[str, dict[str, Any]] = {}
     penalty_candidates: list[dict[str, Any]] = []
     penalty_logs: list[pd.DataFrame] = []
     selected_penalty: dict[str, Any] | None = None
@@ -626,9 +632,14 @@ def run_idp_benchmark(
         )
         torch.manual_seed(int(settings["seed"]))
         monokan = make_paper_monokan_model(model_config)
+        monokan_settings = {
+            **settings,
+            "max_order_factor": float(model_config["monokan"]["max_order_factor"]),
+            "scale_action_by_history_mean": bool(model_config["monokan"]["scale_action_by_history_mean"]),
+        }
         monokan_result = _train_model(
             config,
-            settings,
+            monokan_settings,
             train_products,
             evaluation_products,
             feature_stats,
@@ -641,6 +652,7 @@ def run_idp_benchmark(
         models["PositiveWeightMLP"] = positive_weight_mlp
         models["ConstrainedMonoMLP"] = constrained_mlp
         models["MonoKAN"] = monokan
+        model_action_settings["MonoKAN"] = monokan_settings
 
     predictions = _prediction_table(
         evaluation_products,
@@ -648,6 +660,7 @@ def run_idp_benchmark(
         feature_stats,
         settings,
         oracle_levels,
+        model_action_settings=model_action_settings,
     )
     prediction_summary = _prediction_summary(predictions)
     operational = _operational_table(
@@ -657,6 +670,7 @@ def run_idp_benchmark(
         settings,
         oracle_levels,
         split,
+        model_action_settings=model_action_settings,
     )
     operational_summary = (
         operational.groupby("policy_name", as_index=False)

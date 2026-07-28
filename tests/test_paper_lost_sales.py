@@ -9,6 +9,7 @@ from inventory_control.paper_lost_sales import (
     monotonicity_violation_rate,
     non_omniscient_gamma_base_stock_policy,
     omniscient_gamma_base_stock_policy,
+    paper_critical_quantile,
     paper_evaluation_demand_path,
     oracle_gamma_base_stock_policy,
     paper_lost_sales_step,
@@ -202,6 +203,25 @@ def test_exact_gamma_quantile_matches_known_exponential_quantile() -> None:
     assert gamma_quantile_exact(shape=1.0, scale=2.0, quantile=0.5) == pytest.approx(2.0 * np.log(2.0))
 
 
+def test_paper_critical_quantile_uses_underage_and_overage_costs() -> None:
+    product = PaperLostSalesProduct(
+        product_id="critical-fractile",
+        price=100,
+        purchase_cost=40,
+        holding_cost=5,
+        lost_sale_penalty=10,
+        true_mean_demand=10,
+        true_coefficient_of_variation=0.5,
+        gamma_shape=4,
+        gamma_scale=2.5,
+        demand_distribution_type="Gamma",
+        historical_demand=[10] * 32,
+        initial_inventory=0,
+    )
+
+    assert paper_critical_quantile(product) == pytest.approx(70 / 75)
+
+
 def test_paper_named_gamma_baselines_use_expected_information() -> None:
     product = PaperLostSalesProduct(
         product_id="p",
@@ -224,7 +244,7 @@ def test_paper_named_gamma_baselines_use_expected_information() -> None:
     assert omniscient.name == "OmniscientOptimal"
     assert non_omniscient.name == "NonOmniscientOptimal"
     assert omniscient.S == pytest.approx(
-        gamma_quantile_exact(product.gamma_shape, product.gamma_scale, 11 / 16)
+        gamma_quantile_exact(product.gamma_shape, product.gamma_scale, 11 / 12)
     )
 
 

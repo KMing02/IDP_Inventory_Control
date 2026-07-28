@@ -306,6 +306,7 @@ def paper_order_diagnostics(
     inventory_fractions: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75),
 ) -> dict[str, float]:
     """Measure raw-order calibration on fixed fractions of the observable cap."""
+    batch = move_batch_to_device(batch, infer_model_device(model))
     max_inventory = float(max_order_factor) * torch.clamp(batch["historical_mean_demand"], min=1.0)
     raw_orders = []
     deployed_orders = []
