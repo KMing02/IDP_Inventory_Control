@@ -165,7 +165,7 @@ class BaseStockOrderPolicy:
 def paper_critical_quantile(product: PaperLostSalesProduct) -> float:
     """Return critical fractile for paper-style reward economics."""
     numerator = product.price + product.lost_sale_penalty - product.purchase_cost
-    denominator = product.price + product.lost_sale_penalty + product.holding_cost
+    denominator = numerator + product.holding_cost
     return float(np.clip(numerator / denominator, 0.0, 1.0))
 
 

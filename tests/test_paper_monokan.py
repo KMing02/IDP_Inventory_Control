@@ -16,6 +16,7 @@ from inventory_control.training.direct_backprop import (
     historical_base_stock_imitation_loss,
     make_paper_lost_sales_training_batch,
     paper_lost_sales_raw_order,
+    paper_order_diagnostics,
 )
 from tests.test_paper_lost_sales import _paper_config
 
@@ -128,7 +129,22 @@ def test_monokan_training_reapplies_monotonic_projection() -> None:
 def test_monokan_raw_imitation_improves_calibration_and_logs_diagnostics() -> None:
     products = PaperLostSalesProductGenerator(_paper_config()).generate(1, "train")
     feature_stats = compute_paper_fcnn_feature_stats(products)
+    torch.manual_seed(0)
     model = MonoKANPolicy(input_dim=37, hidden_layers=1, hidden_units=4, grid=3, monotonic_vars={0: -1})
+    diagnostic_batch = make_paper_lost_sales_training_batch(
+        products,
+        horizon=3,
+        generator=torch.Generator().manual_seed(123),
+        feature_stats=feature_stats,
+    )
+    inventory_fractions = tuple(index / 32 for index in range(33))
+    pre_training_rmse = paper_order_diagnostics(
+        model,
+        diagnostic_batch,
+        max_order_factor=4.0,
+        scale_action_by_history_mean=True,
+        inventory_fractions=inventory_fractions,
+    )["raw_imitation_rmse"]
 
     result = train_paper_lost_sales_fcnn(
         products,
@@ -138,15 +154,22 @@ def test_monokan_raw_imitation_improves_calibration_and_logs_diagnostics() -> No
         epochs=0,
         learning_rate=1e-3,
         seed=0,
-        imitation_epochs=5,
+        imitation_epochs=20,
         feature_stats=feature_stats,
         max_order_factor=4.0,
         scale_action_by_history_mean=True,
         clip_imitation_predictions=False,
     )
+    post_training_rmse = paper_order_diagnostics(
+        result.model,
+        diagnostic_batch,
+        max_order_factor=4.0,
+        scale_action_by_history_mean=True,
+        inventory_fractions=inventory_fractions,
+    )["raw_imitation_rmse"]
 
     assert result.training_log is not None
-    assert result.training_log[-1]["raw_imitation_rmse"] < result.training_log[0]["raw_imitation_rmse"]
+    assert post_training_rmse < pre_training_rmse
     assert {
         "raw_order_mean",
         "raw_order_min",
