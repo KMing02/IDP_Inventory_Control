@@ -84,7 +84,7 @@ def test_paper_table_product_generation_matches_reference_shapes() -> None:
     assert product.initial_inventory == 0
     assert len(product.historical_demand) == 8
     assert product.future_demand is not None
-    assert len(product.future_demand) == 14
+    assert len(product.future_demand) == _paper_table_config()["evaluation_horizon"]
 
 
 def test_paper_table_product_generation_matches_table_1_constraints() -> None:
@@ -307,34 +307,45 @@ def test_paper_evaluation_uses_reward_not_cost_names() -> None:
     assert "mean_cost_per_period" not in metrics
 
 
-def test_paper_evaluation_horizon_includes_burn_in_periods() -> None:
+def test_paper_evaluation_excludes_burn_in_and_carries_state_to_terminal_value() -> None:
     product = PaperLostSalesProduct(
         product_id="p",
-        price=0,
-        purchase_cost=0,
-        holding_cost=0,
-        lost_sale_penalty=1,
+        price=10,
+        purchase_cost=3,
+        holding_cost=2,
+        lost_sale_penalty=7,
         true_mean_demand=1,
         true_coefficient_of_variation=0.1,
         gamma_shape=100,
         gamma_scale=0.01,
         demand_distribution_type="Gamma",
         historical_demand=[1] * 32,
-        initial_inventory=0,
-        future_demand=[1, 10, 10],
+        initial_inventory=5,
+        future_demand=[10, 1, 0],
     )
 
     metrics = evaluate_paper_lost_sales_policy(
         product,
-        BaseStockOrderPolicy(S=0, name="zero"),
+        BaseStockOrderPolicy(S=3, name="base-stock"),
         horizon=3,
         n_episodes=1,
         seed=0,
         burn_in=1,
     )
 
-    assert metrics["mean_total_reward"] == -20
-    assert metrics["mean_reward_per_period"] == -10
+    assert metrics["service_level"] == 1
+    assert metrics["lost_sales_rate"] == 0
+    assert metrics["mean_order_quantity"] == 2
+    assert metrics["min_order_quantity"] == 1
+    assert metrics["max_order_quantity"] == 3
+    assert metrics["mean_inventory"] == 2.5
+    assert metrics["mean_sales_revenue"] == 5
+    assert metrics["mean_purchase_cost"] == 6
+    assert metrics["mean_holding_cost"] == 5
+    assert metrics["mean_lost_sales_penalty"] == 0
+    assert metrics["mean_terminal_inventory_value"] == 9
+    assert metrics["mean_total_reward"] == -3
+    assert metrics["mean_reward_per_period"] == -1.5
 
 
 def test_omniscient_gamma_baseline_uses_exact_true_distribution_quantile() -> None:

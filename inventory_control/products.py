@@ -145,9 +145,11 @@ class PaperLostSalesProductGenerator:
             initial_inventory = int(round(mean_demand * _uniform_range(rng, generation["initial_inventory_multiplier_range"])))
         gamma_shape = 1.0 / max(cv**2, 1e-6)
         gamma_scale = mean_demand / gamma_shape
+        evaluation_horizon = self.config.get("evaluation_horizon")
         trace_horizon = max(
-            int(self.config.get("training_horizon_T", 0)),
-            int(self.config.get("evaluation_horizon", 0)) + int(self.config.get("burn_in", 0)),
+            int(evaluation_horizon)
+            if evaluation_horizon is not None
+            else int(self.config.get("training_horizon_T", 0)),
             1,
         )
         demand_trace = np.maximum(

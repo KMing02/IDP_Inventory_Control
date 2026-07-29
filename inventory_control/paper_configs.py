@@ -53,3 +53,7 @@ def validate_paper_lost_sales_config(config: dict[str, Any]) -> None:
         raise ValueError("history_length_H must be positive")
     if int(config["training_horizon_T"]) <= 0:
         raise ValueError("training_horizon_T must be positive")
+    evaluation_horizon = int(config["evaluation_horizon"])
+    burn_in = int(config["burn_in"])
+    if not 0 <= burn_in < evaluation_horizon:
+        raise ValueError("burn_in must satisfy 0 <= burn_in < evaluation_horizon")

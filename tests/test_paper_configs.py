@@ -23,3 +23,23 @@ def test_paper_config_can_be_selected_by_environment(monkeypatch: pytest.MonkeyP
     config = load_paper_lost_sales_config()
 
     assert config["history_length_H"] == 8
+
+
+@pytest.mark.parametrize(
+    ("burn_in", "evaluation_horizon"),
+    [
+        (-1, 12),
+        (12, 12),
+        (13, 12),
+    ],
+)
+def test_paper_config_requires_burn_in_within_total_evaluation_horizon(
+    burn_in: int,
+    evaluation_horizon: int,
+) -> None:
+    config = load_paper_lost_sales_config("configs/paper_lost_sales_debug.yaml")
+    config["burn_in"] = burn_in
+    config["evaluation_horizon"] = evaluation_horizon
+
+    with pytest.raises(ValueError, match="0 <= burn_in < evaluation_horizon"):
+        validate_paper_lost_sales_config(config)
