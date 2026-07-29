@@ -91,6 +91,7 @@ def evaluate_paper_lost_sales_policy(
     """
     rng = np.random.default_rng(seed)
     total_rewards: list[float] = []
+    terminal_inventory_values: list[float] = []
     total_sales = 0.0
     total_demand = 0.0
     total_lost_sales = 0.0
@@ -132,6 +133,9 @@ def evaluate_paper_lost_sales_policy(
                 total_lost_sales_penalty += info["lost_sales_penalty"]
                 total_holding_cost += info["holding_cost"]
                 counted_periods += 1
+        terminal_inventory_value = product.purchase_cost * inventory
+        episode_reward += terminal_inventory_value
+        terminal_inventory_values.append(terminal_inventory_value)
         total_rewards.append(episode_reward)
     denominator = max(counted_periods, 1)
     return {
@@ -147,6 +151,7 @@ def evaluate_paper_lost_sales_policy(
         "mean_purchase_cost": float(total_purchase_cost / denominator),
         "mean_sales_revenue": float(total_revenue / denominator),
         "mean_lost_sales_penalty": float(total_lost_sales_penalty / denominator),
+        "mean_terminal_inventory_value": float(np.mean(terminal_inventory_values)),
     }
 
 

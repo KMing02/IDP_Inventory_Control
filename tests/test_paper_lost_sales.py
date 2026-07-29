@@ -152,7 +152,9 @@ def test_deterministic_rollout_reward_decomposition_is_exact() -> None:
     assert metrics["mean_purchase_cost"] == 6
     assert metrics["mean_holding_cost"] == 1
     assert metrics["mean_lost_sales_penalty"] == 0
-    assert metrics["mean_total_reward"] == 26
+    assert metrics["mean_terminal_inventory_value"] == 4
+    assert metrics["mean_total_reward"] == 30
+    assert metrics["mean_reward_per_period"] == 15
     assert metrics["mean_total_reward"] == pytest.approx(
         2
         * (
@@ -161,6 +163,7 @@ def test_deterministic_rollout_reward_decomposition_is_exact() -> None:
             - metrics["mean_holding_cost"]
             - metrics["mean_lost_sales_penalty"]
         )
+        + metrics["mean_terminal_inventory_value"]
     )
 
 

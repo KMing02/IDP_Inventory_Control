@@ -281,8 +281,9 @@ def _reward_decomposition(operational: pd.DataFrame, counted_periods: int) -> pd
         purchase_cost = float((policy_rows["mean_purchase_cost"] * counted_periods).mean())
         holding_cost = float((policy_rows["mean_holding_cost"] * counted_periods).mean())
         lost_penalty = float((policy_rows["mean_lost_sales_penalty"] * counted_periods).mean())
+        terminal_inventory_value = float(policy_rows["mean_terminal_inventory_value"].mean())
         reward = float(policy_rows["mean_total_reward"].mean())
-        reconstructed = sales_revenue - purchase_cost - holding_cost - lost_penalty
+        reconstructed = sales_revenue - purchase_cost - holding_cost - lost_penalty + terminal_inventory_value
         error = reward - reconstructed
         rows.append(
             {
@@ -291,6 +292,7 @@ def _reward_decomposition(operational: pd.DataFrame, counted_periods: int) -> pd
                 "mean_purchase_cost": purchase_cost,
                 "mean_holding_cost": holding_cost,
                 "mean_lost_sales_penalty": lost_penalty,
+                "mean_terminal_inventory_value": terminal_inventory_value,
                 "mean_total_reward": reward,
                 "reconstructed_mean_total_reward": reconstructed,
                 "decomposition_error": error,
