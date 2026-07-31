@@ -64,19 +64,20 @@ def order_up_to_diagnostic_rows(
     predictions: pd.DataFrame,
     policy_names: Sequence[str],
 ) -> pd.DataFrame:
-    """Return per-product active/inactive slope and q(0)-oracle-S diagnostics."""
+    """Return per-product deployed slope and q(0)-oracle diagnostics."""
     rows: list[dict[str, float | int | str]] = []
     selected = predictions.loc[predictions["policy_name"].isin(policy_names)]
     for (policy_name, product_id), product_rows in selected.groupby(["policy_name", "product_id"], sort=False):
         ordered = product_rows.sort_values("inventory")
         inventory = ordered["inventory"].to_numpy(dtype=float)
         order = ordered["deployed_order"].to_numpy(dtype=float)
-        oracle_order = ordered["oracle_order"].to_numpy(dtype=float)
+        oracle_order = ordered["deployed_oracle_order"].to_numpy(dtype=float)
         slopes = np.diff(order) / np.maximum(np.diff(inventory), 1e-12)
         active = oracle_order[:-1] > 1e-6
         inactive = ~active
         q_zero = float(order[0])
-        oracle_s = float(ordered["omniscient_order_up_to_level"].iloc[0])
+        raw_oracle_s = float(ordered["raw_omniscient_order_up_to_level"].iloc[0])
+        deployed_oracle_s = float(ordered["deployed_omniscient_order_up_to_level"].iloc[0])
         rows.append(
             {
                 "policy_name": policy_name,
@@ -90,8 +91,10 @@ def order_up_to_diagnostic_rows(
                     float(np.mean(np.abs(slopes[inactive]))) if np.any(inactive) else np.nan
                 ),
                 "q_at_zero": q_zero,
-                "oracle_S": oracle_s,
-                "q_at_zero_minus_oracle_S": q_zero - oracle_s,
+                "raw_oracle_S": raw_oracle_s,
+                "deployed_oracle_order_up_to_level": deployed_oracle_s,
+                "oracle_S": deployed_oracle_s,
+                "q_at_zero_minus_oracle_S": q_zero - deployed_oracle_s,
             }
         )
     return pd.DataFrame(rows)

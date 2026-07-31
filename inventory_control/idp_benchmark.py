@@ -75,6 +75,40 @@ class IDPBenchmarkArtifacts:
     sample_efficiency: pd.DataFrame | None = None
 
 
+def _deployment_order_cap(
+    product: PaperLostSalesProduct,
+    inventories: np.ndarray,
+    max_order_factor: float,
+) -> np.ndarray:
+    """Return the shared state-dependent deployment cap for one product."""
+    historical_mean = max(float(np.mean(product.historical_demand)), 1.0)
+    return np.maximum(float(max_order_factor) * historical_mean - inventories, 0.0)
+
+
+class _SharedActionCapPolicyAdapter:
+    """Apply the benchmark deployment cap without changing a policy's raw action."""
+
+    def __init__(
+        self,
+        policy: BaseStockOrderPolicy,
+        product: PaperLostSalesProduct,
+        max_order_factor: float,
+    ) -> None:
+        self.name = policy.name
+        self.policy = policy
+        self.product = product
+        self.max_order_factor = max_order_factor
+
+    def act(self, inventory: float, t: int, rng=None) -> float:
+        raw_order = float(self.policy.act(inventory, t, rng=rng))
+        cap = _deployment_order_cap(
+            self.product,
+            np.asarray([inventory], dtype=float),
+            self.max_order_factor,
+        )
+        return float(min(raw_order, cap[0]))
+
+
 class _TorchPaperPolicyAdapter:
     """Apply one trained torch model using the common IDP deployment rule."""
 
@@ -190,7 +224,7 @@ def _model_orders(
     historical_mean = max(float(np.mean(product.historical_demand)), 1.0)
     if scale_action_by_history_mean:
         raw = raw * historical_mean
-    cap = np.maximum(float(max_order_factor) * historical_mean - inventories, 0.0)
+    cap = _deployment_order_cap(product, inventories, max_order_factor)
     return raw, np.minimum(raw, cap)
 
 
@@ -300,27 +334,22 @@ def _prediction_table(
         historical_mean = max(float(np.mean(product.historical_demand)), 1.0)
         max_inventory = float(settings["max_order_factor"]) * historical_mean
         inventories = np.linspace(0.0, max_inventory, int(settings["inventory_states"]))
-        oracle_order = np.minimum(
-            np.maximum(float(oracle_levels[product.product_id]) - inventories, 0.0),
-            np.maximum(max_inventory - inventories, 0.0),
-        )
+        deployment_cap = _deployment_order_cap(product, inventories, float(settings["max_order_factor"]))
+        raw_oracle_order = np.maximum(float(oracle_levels[product.product_id]) - inventories, 0.0)
+        deployed_oracle_order = np.minimum(raw_oracle_order, deployment_cap)
         non_omniscient_level = non_omniscient_gamma_base_stock_policy(product).S
         empirical_level = historical_demand_base_stock_policy(product).S
+        raw_non_omniscient_order = np.maximum(float(non_omniscient_level) - inventories, 0.0)
+        raw_empirical_order = np.maximum(float(empirical_level) - inventories, 0.0)
         policy_orders: dict[str, tuple[np.ndarray, np.ndarray]] = {
-            "OmniscientOptimal": (oracle_order, oracle_order),
+            "OmniscientOptimal": (raw_oracle_order, deployed_oracle_order),
             "NonOmniscientOptimal": (
-                np.maximum(float(non_omniscient_level) - inventories, 0.0),
-                np.minimum(
-                    np.maximum(float(non_omniscient_level) - inventories, 0.0),
-                    np.maximum(max_inventory - inventories, 0.0),
-                ),
+                raw_non_omniscient_order,
+                np.minimum(raw_non_omniscient_order, deployment_cap),
             ),
             "HistoricalDemandBaseStock": (
-                np.maximum(float(empirical_level) - inventories, 0.0),
-                np.minimum(
-                    np.maximum(float(empirical_level) - inventories, 0.0),
-                    np.maximum(max_inventory - inventories, 0.0),
-                ),
+                raw_empirical_order,
+                np.minimum(raw_empirical_order, deployment_cap),
             ),
         }
         for name, model in models.items():
@@ -334,8 +363,10 @@ def _prediction_table(
             )
         for policy_name, (raw_orders, deployed_orders) in policy_orders.items():
             for state_index, inventory in enumerate(inventories):
+                raw = float(raw_orders[state_index])
                 deployed = float(deployed_orders[state_index])
-                target = float(oracle_order[state_index])
+                raw_target = float(raw_oracle_order[state_index])
+                deployed_target = float(deployed_oracle_order[state_index])
                 rows.append(
                     {
                         "product_id": product.product_id,
@@ -344,12 +375,20 @@ def _prediction_table(
                         "inventory": float(inventory),
                         "inventory_normalized": float(inventory / historical_mean),
                         "historical_mean_demand": historical_mean,
-                        "oracle_order": target,
-                        "raw_order": float(raw_orders[state_index]),
+                        "raw_oracle_order": raw_target,
+                        "deployed_oracle_order": deployed_target,
+                        "oracle_order": deployed_target,
+                        "raw_order": raw,
                         "deployed_order": deployed,
-                        "error": deployed - target,
+                        "raw_error": raw - raw_target,
+                        "deployed_error": deployed - deployed_target,
+                        "error": deployed - deployed_target,
+                        "raw_order_up_to_level": float(raw + inventory),
+                        "deployed_order_up_to_level": float(deployed + inventory),
                         "order_up_to_level": float(deployed + inventory),
-                        "omniscient_order_up_to_level": float(oracle_levels[product.product_id]),
+                        "raw_omniscient_order_up_to_level": float(raw_target + inventory),
+                        "deployed_omniscient_order_up_to_level": float(deployed_target + inventory),
+                        "omniscient_order_up_to_level": float(deployed_target + inventory),
                         "true_coefficient_of_variation": float(product.true_coefficient_of_variation),
                     }
                 )
@@ -359,11 +398,16 @@ def _prediction_table(
 def _prediction_summary(predictions: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for policy_name, policy_rows in predictions.groupby("policy_name", sort=False):
-        errors = policy_rows["error"].to_numpy(dtype=float)
+        raw_errors = policy_rows["raw_error"].to_numpy(dtype=float)
+        deployed_errors = policy_rows["deployed_error"].to_numpy(dtype=float)
         zero_inventory_rows = policy_rows.loc[policy_rows["state_index"] == 0]
-        order_up_to_errors = (
-            zero_inventory_rows["order_up_to_level"].to_numpy(dtype=float)
-            - zero_inventory_rows["omniscient_order_up_to_level"].to_numpy(dtype=float)
+        raw_order_up_to_errors = (
+            zero_inventory_rows["raw_order_up_to_level"].to_numpy(dtype=float)
+            - zero_inventory_rows["raw_omniscient_order_up_to_level"].to_numpy(dtype=float)
+        )
+        deployed_order_up_to_errors = (
+            zero_inventory_rows["deployed_order_up_to_level"].to_numpy(dtype=float)
+            - zero_inventory_rows["deployed_omniscient_order_up_to_level"].to_numpy(dtype=float)
         )
         raw_violations: list[float] = []
         deployed_violations: list[float] = []
@@ -377,10 +421,18 @@ def _prediction_summary(predictions: pd.DataFrame) -> pd.DataFrame:
         rows.append(
             {
                 "policy_name": policy_name,
-                "mae": float(np.mean(np.abs(errors))),
-                "rmse": float(np.sqrt(np.mean(errors**2))),
-                "order_up_to_mae": float(np.mean(np.abs(order_up_to_errors))),
-                "order_up_to_rmse": float(np.sqrt(np.mean(order_up_to_errors**2))),
+                "raw_mae": float(np.mean(np.abs(raw_errors))),
+                "raw_rmse": float(np.sqrt(np.mean(raw_errors**2))),
+                "deployed_mae": float(np.mean(np.abs(deployed_errors))),
+                "deployed_rmse": float(np.sqrt(np.mean(deployed_errors**2))),
+                "mae": float(np.mean(np.abs(deployed_errors))),
+                "rmse": float(np.sqrt(np.mean(deployed_errors**2))),
+                "raw_order_up_to_mae": float(np.mean(np.abs(raw_order_up_to_errors))),
+                "raw_order_up_to_rmse": float(np.sqrt(np.mean(raw_order_up_to_errors**2))),
+                "deployed_order_up_to_mae": float(np.mean(np.abs(deployed_order_up_to_errors))),
+                "deployed_order_up_to_rmse": float(np.sqrt(np.mean(deployed_order_up_to_errors**2))),
+                "order_up_to_mae": float(np.mean(np.abs(deployed_order_up_to_errors))),
+                "order_up_to_rmse": float(np.sqrt(np.mean(deployed_order_up_to_errors**2))),
                 "raw_violation_rate": float(np.mean(raw_increases > 1e-6)),
                 "deployed_violation_rate": float(np.mean(deployed_increases > 1e-6)),
                 "raw_max_violation": float(raw_increases.max(initial=0.0)),
@@ -407,7 +459,7 @@ def _slope_deviations(policy_rows: pd.DataFrame) -> tuple[float, float]:
         ordered = product_rows.sort_values("state_index")
         inventory = ordered["inventory"].to_numpy(dtype=float)
         orders = ordered["deployed_order"].to_numpy(dtype=float)
-        oracle_orders = ordered["oracle_order"].to_numpy(dtype=float)
+        oracle_orders = ordered["deployed_oracle_order"].to_numpy(dtype=float)
         if len(inventory) < 2:
             continue
         slopes = np.diff(orders) / np.maximum(np.diff(inventory), 1e-12)
@@ -433,13 +485,21 @@ def _operational_table(
     rows = []
     seed_start = paper_evaluation_seed_start(split)
     for index, product in enumerate(products):
-        policies = [
+        raw_policies = [
             non_omniscient_gamma_base_stock_policy(product),
             BaseStockOrderPolicy(
                 S=float(oracle_levels[product.product_id]),
                 name="OmniscientOptimal",
             ),
             historical_demand_base_stock_policy(product),
+        ]
+        policies = [
+            _SharedActionCapPolicyAdapter(
+                policy,
+                product,
+                float(settings["max_order_factor"]),
+            )
+            for policy in raw_policies
         ]
         policies.extend(
             _TorchPaperPolicyAdapter(
@@ -899,20 +959,23 @@ def _save_policy_structure_plots(destination: Path, predictions: pd.DataFrame, m
             if policy_name not in {"PaperFCNN", "PositiveWeightMLP", "ConstrainedMonoMLP", "MonoKAN", "NonOmniscientOptimal"}:
                 continue
             ax.scatter(
-                rows["omniscient_order_up_to_level"],
-                rows["order_up_to_level"],
+                rows["deployed_omniscient_order_up_to_level"],
+                rows["deployed_order_up_to_level"],
                 c=rows["true_coefficient_of_variation"],
                 cmap="viridis",
                 label=policy_name,
                 alpha=0.7,
             )
         max_level = float(
-            max(zero_inventory["omniscient_order_up_to_level"].max(), zero_inventory["order_up_to_level"].max())
+            max(
+                zero_inventory["deployed_omniscient_order_up_to_level"].max(),
+                zero_inventory["deployed_order_up_to_level"].max(),
+            )
         )
         ax.plot([0, max_level], [0, max_level], color="black", linewidth=1)
-        ax.set_title("Learned vs omniscient order-up-to level")
-        ax.set_xlabel("Omniscient order-up-to level")
-        ax.set_ylabel("Learned order-up-to level")
+        ax.set_title("Deployed vs capped omniscient order-up-to level")
+        ax.set_xlabel("Capped omniscient order-up-to level")
+        ax.set_ylabel("Deployed order-up-to level")
         ax.grid(alpha=0.3)
         ax.legend()
         fig.savefig(plots_dir / "figure3_order_up_to_scatter.png", bbox_inches="tight", dpi=150)
