@@ -1,4 +1,5 @@
 import pytest
+import inspect
 
 torch = pytest.importorskip("torch")
 
@@ -18,6 +19,34 @@ from inventory_control.training.direct_backprop import (
 )
 from inventory_control.products import PaperLostSalesProductGenerator
 from tests.test_paper_lost_sales import _paper_config
+
+
+def test_training_package_exports_legacy_and_neutral_helpers() -> None:
+    from inventory_control.training import (
+        paper_lost_sales_fcnn_order as package_old_order,
+        paper_lost_sales_fcnn_rollout as package_old_rollout,
+        paper_lost_sales_policy_order as package_neutral_order,
+        paper_lost_sales_policy_rollout as package_neutral_rollout,
+        train_paper_lost_sales_fcnn as package_old_train,
+        train_paper_lost_sales_policy as package_neutral_train,
+    )
+
+    assert inspect.signature(package_old_order) == inspect.signature(package_neutral_order)
+    assert inspect.signature(package_old_rollout) == inspect.signature(package_neutral_rollout)
+    train_parameters = inspect.signature(package_neutral_train).parameters.values()
+    assert {parameter.kind for parameter in train_parameters} == {
+        inspect.Parameter.VAR_POSITIONAL,
+        inspect.Parameter.VAR_KEYWORD,
+    }
+    assert package_old_train is not None
+
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(2, "train")
+    model = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
+    batch = make_paper_lost_sales_training_batch(products, horizon=3, generator=torch.Generator().manual_seed(0))
+    inventory = batch["initial_inventory"]
+
+    assert torch.allclose(package_old_order(model, batch, inventory), package_neutral_order(model, batch, inventory))
+    assert torch.allclose(package_old_rollout(model, batch), package_neutral_rollout(model, batch))
 
 
 def test_fcnn_output_is_nonnegative() -> None:
@@ -95,6 +124,25 @@ def test_training_batch_uses_stored_future_demand_trace() -> None:
     batch = make_paper_lost_sales_training_batch([product], horizon=3, generator=torch.Generator().manual_seed(0))
 
     assert batch["demand_paths"].tolist() == [[3.0, 4.0, 5.0]]
+
+
+def test_training_batch_can_resample_demand_instead_of_using_stored_trace() -> None:
+    product = PaperLostSalesProductGenerator(_paper_config()).generate(1, "train")[0]
+    product = product.__class__(
+        **{
+            **product.__dict__,
+            "future_demand": [3, 4, 5, 6],
+        }
+    )
+
+    batch = make_paper_lost_sales_training_batch(
+        [product],
+        horizon=3,
+        generator=torch.Generator().manual_seed(0),
+        demand_mode="resample",
+    )
+
+    assert batch["demand_paths"].tolist() != [[3.0, 4.0, 5.0]]
 
 
 def test_fcnn_adapter_state_dependent_cap_stops_orders_at_high_inventory() -> None:

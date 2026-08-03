@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import copy
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -30,36 +30,62 @@ from inventory_control.paper_lost_sales import (
     historical_demand_base_stock_policy,
     non_omniscient_gamma_base_stock_policy,
     omniscient_gamma_base_stock_policy,
+    paper_evaluation_demand_path,
 )
 from inventory_control.policies.neural.fcnn import (
     PaperFCNNFeatureStats,
-    build_paper_lost_sales_features,
     compute_paper_fcnn_feature_stats,
     infer_model_device,
     make_paper_fcnn_model,
+    make_paper_order_up_to_fcnn_model,
+    make_paper_residual_order_up_to_fcnn_model,
 )
 from inventory_control.policies.neural.constrained_mlp import (
     make_constrained_monotone_mlp_model,
+    make_paper_residual_order_up_to_constrained_mlp_model,
     make_positive_weight_mlp_model,
 )
 from inventory_control.policies.neural.monokan import (
+    MonoKANPolicy,
     make_paper_monokan_model,
+    make_paper_order_up_to_monokan_model,
+    make_paper_residual_order_up_to_kan_model,
+    make_paper_residual_order_up_to_monokan_model,
     sample_monokan_first_layer_splines,
 )
+from inventory_control.policies.neural.registry import (
+    DEFAULT_STRUCTURE_POLICY_NAMES,
+    NEURAL_POLICY_SPECS,
+    TRAINABLE_POLICY_NAMES,
+    checkpoint_filenames,
+)
 from inventory_control.products import PaperLostSalesProduct, PaperLostSalesProductGenerator
-from inventory_control.training.direct_backprop import DirectBackpropResult, train_paper_lost_sales_fcnn
+from inventory_control.training.direct_backprop import (
+    DirectBackpropResult,
+    make_paper_lost_sales_training_batch,
+    paper_lost_sales_context_features,
+    paper_lost_sales_raw_order,
+    paper_lost_sales_target_level,
+    train_paper_lost_sales_policy,
+)
 
 
-POLICY_ORDER = [
-    "PaperFCNN",
-    "PositiveWeightMLP",
-    "ConstrainedMonoMLP",
-    "MonoKAN",
-    "PenaltyMLP",
+POLICY_ORDER = [spec.name for spec in sorted(NEURAL_POLICY_SPECS, key=lambda spec: spec.order)] + [
     "NonOmniscientOptimal",
     "OmniscientOptimal",
     "HistoricalDemandBaseStock",
 ]
+
+TRAINABLE_POLICIES = TRAINABLE_POLICY_NAMES
+DEFAULT_TRAINABLE_POLICIES = DEFAULT_STRUCTURE_POLICY_NAMES
+
+
+def _anchor_policy(product: PaperLostSalesProduct, residual_anchor: str) -> BaseStockOrderPolicy:
+    if residual_anchor == "gamma":
+        return historical_demand_base_stock_policy(product, fit_gamma=True)
+    if residual_anchor == "empirical":
+        return historical_demand_base_stock_policy(product, fit_gamma=False)
+    raise ValueError(f"Unsupported residual_anchor: {residual_anchor}")
 
 
 @dataclass(frozen=True)
@@ -115,6 +141,9 @@ def _profile_settings(config: dict[str, Any], profile: str) -> dict[str, Any]:
     if benchmark is None:
         raise ValueError("paper lost-sales config is missing idp_benchmark settings")
     settings = {**benchmark, **benchmark[profile]}
+    for field in ("learning_rate", "include_terminal_salvage"):
+        if field not in settings and field in config:
+            settings[field] = config[field]
     settings["profile"] = profile
     if profile in {"compact", "paper_replication"}:
         settings["penalty_weights"] = benchmark[profile].get("penalty_weights", [1.0])
@@ -123,6 +152,7 @@ def _profile_settings(config: dict[str, Any], profile: str) -> dict[str, Any]:
 
 def _model_config(config: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     """Return a config with matched depth/width for IDP neural models."""
+    monokan_config = config.get("monokan", {})
     return {
         **config,
         "fcnn": {
@@ -135,12 +165,12 @@ def _model_config(config: dict[str, Any], settings: dict[str, Any]) -> dict[str,
             "activation": str(config["fcnn"]["activation"]),
         },
         "monokan": {
-            **config.get("monokan", {}),
-            "hidden_layers": int(settings["hidden_layers"]),
-            "hidden_units": int(settings["hidden_units"]),
-            "max_order_factor": float(config.get("monokan", {}).get("max_order_factor", settings["max_order_factor"])),
+            **monokan_config,
+            "hidden_layers": int(monokan_config.get("hidden_layers", settings["hidden_layers"])),
+            "hidden_units": int(monokan_config.get("hidden_units", settings["hidden_units"])),
+            "max_order_factor": float(monokan_config.get("max_order_factor", settings["max_order_factor"])),
             "scale_action_by_history_mean": bool(
-                config.get("monokan", {}).get("scale_action_by_history_mean", settings["scale_action_by_history_mean"])
+                monokan_config.get("scale_action_by_history_mean", settings["scale_action_by_history_mean"])
             ),
         },
         "positive_weight_mlp": {
@@ -168,32 +198,190 @@ def _model_orders(
     max_order_factor: float,
     scale_action_by_history_mean: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
-    features = [
-        build_paper_lost_sales_features(
-            inventory=float(inventory),
-            historical_demand=product.historical_demand,
-            price=product.price,
-            purchase_cost=product.purchase_cost,
-            holding_cost=product.holding_cost,
-            lost_sale_penalty=product.lost_sale_penalty,
-            feature_stats=feature_stats,
-        )
-        for inventory in inventories
-    ]
+    device = infer_model_device(model)
+    history = torch.tensor(
+        [[float(value) / feature_stats.demand_scale for value in product.historical_demand] for _ in inventories],
+        dtype=torch.float32,
+        device=device,
+    )
+    historical_mean = max(float(np.mean(product.historical_demand)), 1.0)
+    batch = {
+        "history": history,
+        "feature_demand_scale": torch.full((len(inventories),), feature_stats.demand_scale, dtype=torch.float32, device=device),
+        "feature_price_scale": torch.full((len(inventories),), feature_stats.price_scale, dtype=torch.float32, device=device),
+        "historical_mean_demand": torch.full((len(inventories),), historical_mean, dtype=torch.float32, device=device),
+        "historical_base_stock_level": torch.full(
+            (len(inventories),),
+            float(_anchor_policy(product, str(getattr(model, "paper_residual_anchor", "gamma"))).S),
+            dtype=torch.float32,
+            device=device,
+        ),
+        "price": torch.full((len(inventories),), float(product.price), dtype=torch.float32, device=device),
+        "purchase_cost": torch.full((len(inventories),), float(product.purchase_cost), dtype=torch.float32, device=device),
+        "holding_cost": torch.full((len(inventories),), float(product.holding_cost), dtype=torch.float32, device=device),
+        "lost_sale_penalty": torch.full((len(inventories),), float(product.lost_sale_penalty), dtype=torch.float32, device=device),
+    }
+    inventory_t = torch.tensor(inventories, dtype=torch.float32, device=device)
     model.eval()
     with torch.no_grad():
-        raw = (
-            model(torch.tensor(features, dtype=torch.float32, device=infer_model_device(model)))
-            .detach()
-            .cpu()
-            .numpy()
-            .astype(float)
+        raw = paper_lost_sales_raw_order(
+            model,
+            batch,
+            inventory_t,
+            scale_action_by_history_mean=scale_action_by_history_mean,
         )
-    historical_mean = max(float(np.mean(product.historical_demand)), 1.0)
-    if scale_action_by_history_mean:
-        raw = raw * historical_mean
+        raw = raw.detach().cpu().numpy().astype(float)
     cap = np.maximum(float(max_order_factor) * historical_mean - inventories, 0.0)
     return raw, np.minimum(raw, cap)
+
+
+def _batched_torch_policy_metrics(
+    products: list[PaperLostSalesProduct],
+    model: nn.Module,
+    feature_stats: PaperFCNNFeatureStats,
+    settings: dict[str, Any],
+    split: str,
+) -> pd.DataFrame:
+    """Evaluate one torch policy over products with batched per-period forward passes."""
+    if not products:
+        return pd.DataFrame()
+    horizon = int(settings["evaluation_horizon"])
+    burn_in = int(settings["burn_in"])
+    seed_start = paper_evaluation_seed_start(split)
+    device = infer_model_device(model)
+    histories = torch.tensor(
+        [
+            [
+                value / feature_stats.demand_scale
+                for value in product.historical_demand
+            ]
+            for product in products
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+    historical_mean = np.asarray(
+        [max(float(np.mean(product.historical_demand)), 1.0) for product in products],
+        dtype=float,
+    )
+    historical_mean_t = torch.tensor(historical_mean, dtype=torch.float32, device=device)
+    price = torch.tensor([product.price for product in products], dtype=torch.float32, device=device)
+    purchase_cost = torch.tensor([product.purchase_cost for product in products], dtype=torch.float32, device=device)
+    holding_cost = torch.tensor([product.holding_cost for product in products], dtype=torch.float32, device=device)
+    lost_sale_penalty = torch.tensor([product.lost_sale_penalty for product in products], dtype=torch.float32, device=device)
+    historical_base_stock = torch.tensor(
+        [_anchor_policy(product, str(getattr(model, "paper_residual_anchor", settings.get("residual_anchor", "gamma")))).S for product in products],
+        dtype=torch.float32,
+        device=device,
+    )
+    batch = {
+        "history": histories,
+        "feature_demand_scale": torch.full((len(products),), feature_stats.demand_scale, dtype=torch.float32, device=device),
+        "feature_price_scale": torch.full((len(products),), feature_stats.price_scale, dtype=torch.float32, device=device),
+        "historical_mean_demand": historical_mean_t,
+        "historical_base_stock_level": historical_base_stock,
+        "price": price,
+        "purchase_cost": purchase_cost,
+        "holding_cost": holding_cost,
+        "lost_sale_penalty": lost_sale_penalty,
+    }
+    demand_paths = torch.tensor(
+        np.asarray(
+            [
+            paper_evaluation_demand_path(product, horizon=horizon, seed=seed_start + index)
+            for index, product in enumerate(products)
+            ],
+            dtype=float,
+        ),
+        dtype=torch.float32,
+        device=device,
+    )
+    inventory = torch.tensor([float(product.initial_inventory) for product in products], dtype=torch.float32, device=device)
+    max_inventory_level = float(settings["max_order_factor"]) * historical_mean_t
+    total_reward = torch.zeros(len(products), dtype=torch.float32, device=device)
+    total_sales = torch.zeros_like(total_reward)
+    total_demand = torch.zeros_like(total_reward)
+    total_lost_sales = torch.zeros_like(total_reward)
+    total_order = torch.zeros_like(total_reward)
+    total_inventory = torch.zeros_like(total_reward)
+    total_revenue = torch.zeros_like(total_reward)
+    total_purchase = torch.zeros_like(total_reward)
+    total_lost_penalty = torch.zeros_like(total_reward)
+    total_holding = torch.zeros_like(total_reward)
+    min_order = torch.full_like(total_reward, float("inf"))
+    max_order = torch.zeros_like(total_reward)
+    counted = max(horizon - burn_in, 1)
+
+    model.eval()
+    with torch.no_grad():
+        parameterization = getattr(model, "paper_action_parameterization", "raw")
+        target_level = (
+            paper_lost_sales_target_level(model, batch)
+            if parameterization in {"order_up_to", "residual_order_up_to"}
+            else None
+        )
+        for t in range(horizon):
+            if target_level is None:
+                raw_order = paper_lost_sales_raw_order(
+                    model,
+                    batch,
+                    inventory,
+                    scale_action_by_history_mean=bool(settings["scale_action_by_history_mean"]),
+                )
+            else:
+                raw_order = torch.relu(target_level - inventory)
+            order_cap = torch.relu(max_inventory_level - inventory)
+            order = torch.minimum(raw_order, order_cap)
+            demand = demand_paths[:, t]
+            available = inventory + order
+            sales = torch.minimum(demand, available)
+            lost_sales = torch.relu(demand - available)
+            ending_inventory = torch.relu(available - demand)
+            revenue = price * sales
+            purchase = purchase_cost * order
+            lost_penalty = lost_sale_penalty * lost_sales
+            holding = holding_cost * ending_inventory
+            reward = revenue - purchase - lost_penalty - holding
+            if t >= burn_in:
+                total_reward += reward
+                total_sales += sales
+                total_demand += demand
+                total_lost_sales += lost_sales
+                total_order += order
+                min_order = torch.minimum(min_order, order)
+                max_order = torch.maximum(max_order, order)
+                total_inventory += ending_inventory
+                total_revenue += revenue
+                total_purchase += purchase
+                total_lost_penalty += lost_penalty
+                total_holding += holding
+            inventory = ending_inventory
+
+    rows = []
+    values = {
+        "mean_total_reward": total_reward.detach().cpu().numpy(),
+        "service_level": torch.where(total_demand > 0, total_sales / total_demand, torch.ones_like(total_demand)).detach().cpu().numpy(),
+        "lost_sales_rate": torch.where(total_demand > 0, total_lost_sales / total_demand, torch.zeros_like(total_demand)).detach().cpu().numpy(),
+        "mean_order_quantity": (total_order / counted).detach().cpu().numpy(),
+        "min_order_quantity": torch.where(torch.isinf(min_order), torch.zeros_like(min_order), min_order).detach().cpu().numpy(),
+        "max_order_quantity": max_order.detach().cpu().numpy(),
+        "mean_inventory": (total_inventory / counted).detach().cpu().numpy(),
+        "mean_holding_cost": (total_holding / counted).detach().cpu().numpy(),
+        "mean_purchase_cost": (total_purchase / counted).detach().cpu().numpy(),
+        "mean_sales_revenue": (total_revenue / counted).detach().cpu().numpy(),
+        "mean_lost_sales_penalty": (total_lost_penalty / counted).detach().cpu().numpy(),
+    }
+    for index, product in enumerate(products):
+        row = {
+            "product_id": product.product_id,
+            "policy_name": "",
+            "evaluation_split": split,
+            "evaluation_seed": seed_start + index,
+        }
+        row.update({name: float(array[index]) for name, array in values.items()})
+        row["mean_reward_per_period"] = float(row["mean_total_reward"] / counted)
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def _mean_validation_reward(
@@ -205,28 +393,9 @@ def _mean_validation_reward(
     feature_stats: PaperFCNNFeatureStats,
     split: str,
 ) -> float:
-    seed_start = paper_evaluation_seed_start(split)
-    rewards = []
-    for index, product in enumerate(products):
-        policy = _TorchPaperPolicyAdapter(
-            name,
-            model,
-            product,
-            feature_stats,
-            float(settings["max_order_factor"]),
-            bool(settings["scale_action_by_history_mean"]),
-        )
-        rewards.append(
-            evaluate_paper_lost_sales_policy(
-                product,
-                policy,
-                horizon=int(settings["evaluation_horizon"]),
-                n_episodes=1,
-                seed=seed_start + index,
-                burn_in=int(settings["burn_in"]),
-            )["mean_total_reward"]
-        )
-    return float(np.mean(rewards))
+    del config, name
+    metrics = _batched_torch_policy_metrics(products, model, feature_stats, settings, split)
+    return float(metrics["mean_total_reward"].mean()) if not metrics.empty else 0.0
 
 
 def _train_model(
@@ -240,10 +409,10 @@ def _train_model(
     split: str,
     penalty_weight: float = 0.0,
     clip_imitation_predictions: bool = True,
+    progress: Callable[[str], None] | None = None,
 ) -> DirectBackpropResult:
     def validation_callback(epoch: int, current_model: nn.Module) -> float:
-        del epoch
-        return _mean_validation_reward(
+        validation_reward = _mean_validation_reward(
             config,
             settings,
             validation_products,
@@ -252,14 +421,22 @@ def _train_model(
             feature_stats,
             split,
         )
+        if progress is not None:
+            progress(f"{name}: validation epoch={epoch} mean_total_reward={validation_reward:.3f}")
+        return validation_reward
 
-    result = train_paper_lost_sales_fcnn(
+    if progress is not None:
+        progress(
+            f"{name}: start training products={len(products)} batch_size={min(int(settings['batch_size']), len(products))} "
+            f"horizon={int(settings['training_horizon'])} epochs={int(settings['imitation_epochs']) + int(settings['reward_epochs'])}"
+        )
+    result = train_paper_lost_sales_policy(
         products,
         model,
         horizon=int(settings["training_horizon"]),
         batch_size=min(int(settings["batch_size"]), len(products)),
         epochs=int(settings["reward_epochs"]),
-        learning_rate=float(config["learning_rate"]),
+        learning_rate=float(settings.get("learning_rate", config["learning_rate"])),
         seed=int(settings["seed"]),
         imitation_epochs=int(settings["imitation_epochs"]),
         validation_products=validation_products,
@@ -271,10 +448,25 @@ def _train_model(
         normalize_reward_loss=bool(settings["normalize_reward_loss"]),
         monotonicity_penalty_weight=float(penalty_weight),
         monotonicity_samples_per_product=int(settings["monotonicity_samples_per_product"]),
+        cap_excess_penalty_weight=float(settings.get("cap_excess_penalty_weight", 0.0)),
+        cap_excess_samples_per_product=int(settings.get("cap_excess_samples_per_product", 1)),
+        target_stock_penalty_weight=float(settings.get("target_stock_penalty_weight", 0.0)),
+        target_stock_samples_per_product=int(settings.get("target_stock_samples_per_product", 1)),
+        active_slope_penalty_weight=float(settings.get("active_slope_penalty_weight", 0.0)),
+        active_slope_samples_per_product=int(settings.get("active_slope_samples_per_product", 1)),
+        spline_l2_weight=float(settings.get("spline_l2_weight", 0.0)),
+        scale_l2_weight=float(settings.get("scale_l2_weight", 0.0)),
+        training_demand_mode=str(settings.get("training_demand_mode", "fixed_future")),
+        residual_anchor=str(settings.get("residual_anchor", "gamma")),
+        include_terminal_salvage=bool(settings.get("include_terminal_salvage", False)),
         clip_imitation_predictions=clip_imitation_predictions,
     )
     if result.best_state_dict is not None:
         model.load_state_dict(result.best_state_dict)
+    if progress is not None:
+        best = result.best_validation_reward
+        suffix = f" best_validation={best:.3f}" if best is not None else ""
+        progress(f"{name}: finished training_seconds={result.elapsed_seconds:.3f}{suffix}")
     return result
 
 
@@ -446,17 +638,6 @@ def _operational_table(
             ),
             historical_demand_base_stock_policy(product),
         ]
-        policies.extend(
-            _TorchPaperPolicyAdapter(
-                name,
-                model,
-                product,
-                feature_stats,
-                float((model_action_settings or {}).get(name, settings)["max_order_factor"]),
-                bool((model_action_settings or {}).get(name, settings)["scale_action_by_history_mean"]),
-            )
-            for name, model in models.items()
-        )
         for policy in policies:
             metrics = evaluate_paper_lost_sales_policy(
                 product,
@@ -475,6 +656,18 @@ def _operational_table(
                     **metrics,
                 }
             )
+    for name, model in models.items():
+        action_settings = (model_action_settings or {}).get(name, settings)
+        neural_rows = _batched_torch_policy_metrics(
+            products,
+            model,
+            feature_stats,
+            action_settings,
+            split,
+        )
+        if not neural_rows.empty:
+            neural_rows["policy_name"] = name
+            rows.extend(neural_rows.to_dict("records"))
     return pd.DataFrame(rows)
 
 
@@ -495,6 +688,19 @@ def _parameter_count(model: nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
 
 
+def _normalize_requested_models(models: list[str] | tuple[str, ...] | set[str] | None) -> set[str]:
+    if models is None:
+        return set(DEFAULT_TRAINABLE_POLICIES)
+    requested = {model.strip() for model in models if model.strip()}
+    unknown = requested - TRAINABLE_POLICIES
+    if unknown:
+        supported = ", ".join(sorted(TRAINABLE_POLICIES))
+        raise ValueError(f"unknown trainable model(s): {', '.join(sorted(unknown))}; supported: {supported}")
+    if not requested:
+        raise ValueError("at least one trainable model must be selected")
+    return requested
+
+
 def run_idp_benchmark(
     config_path: str | Path | None = None,
     profile: str = "compact",
@@ -502,11 +708,16 @@ def run_idp_benchmark(
     split: str = "validation",
     final_test: bool = False,
     output_dir: str | Path | None = None,
+    models: list[str] | tuple[str, ...] | set[str] | None = None,
+    progress: bool = False,
+    diagnostics: bool = True,
 ) -> IDPBenchmarkArtifacts:
     """Train, evaluate, and save the unified IDP benchmark."""
     require_final_test_confirmation(split, final_test)
     if mode not in {"replicate-ls", "structure-ls", "sample-efficiency"}:
         raise ValueError("mode must be 'replicate-ls', 'structure-ls', or 'sample-efficiency'")
+    requested_models = _normalize_requested_models(models)
+    progress_callback = print if progress else None
     config = load_paper_lost_sales_config(config_path)
     settings = _profile_settings(config, profile)
     model_config = _model_config(config, settings)
@@ -517,27 +728,33 @@ def run_idp_benchmark(
     evaluation_products = generator.generate(int(settings["validation_products"]), split=split)
     feature_stats = compute_paper_fcnn_feature_stats(train_products)
 
-    torch.manual_seed(int(settings["seed"]))
-    paper_fcnn = make_paper_fcnn_model(model_config)
-    shared_initial_state = copy.deepcopy(paper_fcnn.state_dict())
-    paper_fcnn_result = _train_model(
-        config,
-        settings,
-        train_products,
-        evaluation_products,
-        feature_stats,
-        paper_fcnn,
-        "PaperFCNN",
-        split,
-    )
-
     oracle_levels = _oracle_levels(
         evaluation_products,
         int(settings["oracle_mc_samples"]),
         int(settings["seed"]) + 10_000,
     )
-    models: dict[str, nn.Module] = {"PaperFCNN": paper_fcnn}
+    trained_models: dict[str, nn.Module] = {}
     model_action_settings: dict[str, dict[str, Any]] = {}
+    paper_fcnn_result: DirectBackpropResult | None = None
+    paper_fcnn: nn.Module | None = None
+    shared_initial_state: dict[str, torch.Tensor] | None = None
+    if "PaperFCNN" in requested_models or "PenaltyMLP" in requested_models:
+        torch.manual_seed(int(settings["seed"]))
+        paper_fcnn = make_paper_fcnn_model(model_config)
+        shared_initial_state = copy.deepcopy(paper_fcnn.state_dict())
+    if "PaperFCNN" in requested_models:
+        paper_fcnn_result = _train_model(
+            config,
+            settings,
+            train_products,
+            evaluation_products,
+            feature_stats,
+            paper_fcnn,
+            "PaperFCNN",
+            split,
+            progress=progress_callback,
+        )
+        trained_models["PaperFCNN"] = paper_fcnn
     penalty_candidates: list[dict[str, Any]] = []
     penalty_logs: list[pd.DataFrame] = []
     selected_penalty: dict[str, Any] | None = None
@@ -547,6 +764,8 @@ def run_idp_benchmark(
     positive_weight_mlp: nn.Module | None = None
     constrained_mlp_result: DirectBackpropResult | None = None
     constrained_mlp: nn.Module | None = None
+    extra_results: dict[str, DirectBackpropResult] = {}
+    extra_models: dict[str, nn.Module] = {}
     sample_efficiency = pd.DataFrame()
     if mode == "sample-efficiency":
         sample_efficiency = _run_sample_efficiency(
@@ -557,115 +776,264 @@ def run_idp_benchmark(
             destination,
         )
     if mode == "structure-ls":
-        for weight in settings["penalty_weights"]:
-            penalty_model = make_paper_fcnn_model(model_config)
-            penalty_model.load_state_dict(shared_initial_state)
+        if "PaperFCNNOrderUpTo" in requested_models:
+            torch.manual_seed(int(settings["seed"]) + 201)
+            model = make_paper_order_up_to_fcnn_model(model_config)
             result = _train_model(
                 config,
                 settings,
                 train_products,
                 evaluation_products,
                 feature_stats,
-                penalty_model,
-                f"PenaltyMLP(lambda={float(weight):g})",
+                model,
+                "PaperFCNNOrderUpTo",
                 split,
-                penalty_weight=float(weight),
+                progress=progress_callback,
             )
-            candidate_predictions = _prediction_table(
+            trained_models["PaperFCNNOrderUpTo"] = model
+            extra_models["PaperFCNNOrderUpTo"] = model
+            extra_results["PaperFCNNOrderUpTo"] = result
+        if "PaperFCNNResidualOrderUpTo" in requested_models:
+            torch.manual_seed(int(settings["seed"]) + 202)
+            model = make_paper_residual_order_up_to_fcnn_model(model_config)
+            fcnn_residual_settings = {
+                **settings,
+                "residual_anchor": str(model_config["fcnn"].get("residual_anchor", settings.get("residual_anchor", "gamma"))),
+            }
+            result = _train_model(
+                config,
+                fcnn_residual_settings,
+                train_products,
                 evaluation_products,
-                {"PenaltyMLP": penalty_model},
                 feature_stats,
-                settings,
-                oracle_levels,
+                model,
+                "PaperFCNNResidualOrderUpTo",
+                split,
+                progress=progress_callback,
             )
-            diagnostics = _prediction_summary(candidate_predictions)
-            penalty_diagnostics = diagnostics.loc[diagnostics["policy_name"] == "PenaltyMLP"].iloc[0]
-            validation_reward = _mean_validation_reward(
+            trained_models["PaperFCNNResidualOrderUpTo"] = model
+            extra_models["PaperFCNNResidualOrderUpTo"] = model
+            extra_results["PaperFCNNResidualOrderUpTo"] = result
+        if "ConstrainedMLPResidualOrderUpTo" in requested_models:
+            torch.manual_seed(int(settings["seed"]) + 203)
+            model = make_paper_residual_order_up_to_constrained_mlp_model(model_config)
+            constrained_residual_settings = {
+                **settings,
+                "residual_anchor": str(
+                    model_config["constrained_monotone_mlp"].get(
+                        "residual_anchor",
+                        model_config["fcnn"].get("residual_anchor", settings.get("residual_anchor", "gamma")),
+                    )
+                ),
+            }
+            result = _train_model(
+                config,
+                constrained_residual_settings,
+                train_products,
+                evaluation_products,
+                feature_stats,
+                model,
+                "ConstrainedMLPResidualOrderUpTo",
+                split,
+                progress=progress_callback,
+            )
+            trained_models["ConstrainedMLPResidualOrderUpTo"] = model
+            model_action_settings["ConstrainedMLPResidualOrderUpTo"] = constrained_residual_settings
+            extra_models["ConstrainedMLPResidualOrderUpTo"] = model
+            extra_results["ConstrainedMLPResidualOrderUpTo"] = result
+        if "PenaltyMLP" in requested_models:
+            if shared_initial_state is None:
+                raise RuntimeError("PenaltyMLP requires an initialized PaperFCNN state")
+            for weight in settings["penalty_weights"]:
+                penalty_model = make_paper_fcnn_model(model_config)
+                penalty_model.load_state_dict(shared_initial_state)
+                penalty_kind = str(settings.get("structural_penalty_kind", "target_stock"))
+                if penalty_kind == "active_slope":
+                    penalty_settings = {**settings, "active_slope_penalty_weight": float(weight)}
+                elif penalty_kind == "target_stock":
+                    penalty_settings = {**settings, "target_stock_penalty_weight": float(weight)}
+                else:
+                    raise ValueError(f"Unsupported structural_penalty_kind: {penalty_kind}")
+                result = _train_model(
+                    config,
+                    penalty_settings,
+                    train_products,
+                    evaluation_products,
+                    feature_stats,
+                    penalty_model,
+                    f"PenaltyMLP(lambda={float(weight):g})",
+                    split,
+                    penalty_weight=0.0,
+                    progress=progress_callback,
+                )
+                candidate_predictions = _prediction_table(
+                    evaluation_products,
+                    {"PenaltyMLP": penalty_model},
+                    feature_stats,
+                    settings,
+                    oracle_levels,
+                )
+                penalty_prediction_summary = _prediction_summary(candidate_predictions)
+                penalty_diagnostics = penalty_prediction_summary.loc[
+                    penalty_prediction_summary["policy_name"] == "PenaltyMLP"
+                ].iloc[0]
+                validation_reward = _mean_validation_reward(
+                    config,
+                    settings,
+                    evaluation_products,
+                    penalty_model,
+                    "PenaltyMLP",
+                    feature_stats,
+                    split,
+                )
+                penalty_candidates.append(
+                    {
+                        "weight": float(weight),
+                        "model": penalty_model,
+                        "result": result,
+                        "validation_reward": validation_reward,
+                        "raw_violation_rate": float(penalty_diagnostics["raw_violation_rate"]),
+                    }
+                )
+                candidate_log = pd.DataFrame(result.training_log or [])
+                candidate_log["policy_name"] = f"PenaltyMLP(lambda={float(weight):g})"
+                candidate_log["penalty_weight"] = float(weight)
+                penalty_logs.append(candidate_log)
+            selected_penalty = _select_penalty_candidate(
+                penalty_candidates,
+                float(settings["raw_violation_threshold"]),
+            )
+            trained_models["PenaltyMLP"] = selected_penalty["model"]
+        if "PositiveWeightMLP" in requested_models:
+            torch.manual_seed(int(settings["seed"]) + 101)
+            positive_weight_mlp = make_positive_weight_mlp_model(model_config)
+            positive_weight_result = _train_model(
                 config,
                 settings,
+                train_products,
                 evaluation_products,
-                penalty_model,
-                "PenaltyMLP",
                 feature_stats,
+                positive_weight_mlp,
+                "PositiveWeightMLP",
                 split,
+                progress=progress_callback,
             )
-            penalty_candidates.append(
-                {
-                    "weight": float(weight),
-                    "model": penalty_model,
-                    "result": result,
-                    "validation_reward": validation_reward,
-                    "raw_violation_rate": float(penalty_diagnostics["raw_violation_rate"]),
-                }
+            trained_models["PositiveWeightMLP"] = positive_weight_mlp
+        if "ConstrainedMonoMLP" in requested_models:
+            torch.manual_seed(int(settings["seed"]) + 102)
+            constrained_mlp = make_constrained_monotone_mlp_model(model_config)
+            constrained_mlp_result = _train_model(
+                config,
+                settings,
+                train_products,
+                evaluation_products,
+                feature_stats,
+                constrained_mlp,
+                "ConstrainedMonoMLP",
+                split,
+                progress=progress_callback,
             )
-            candidate_log = pd.DataFrame(result.training_log or [])
-            candidate_log["policy_name"] = f"PenaltyMLP(lambda={float(weight):g})"
-            candidate_log["penalty_weight"] = float(weight)
-            penalty_logs.append(candidate_log)
-        selected_penalty = _select_penalty_candidate(
-            penalty_candidates,
-            float(settings["raw_violation_threshold"]),
-        )
-        torch.manual_seed(int(settings["seed"]) + 101)
-        positive_weight_mlp = make_positive_weight_mlp_model(model_config)
-        positive_weight_result = _train_model(
-            config,
-            settings,
-            train_products,
-            evaluation_products,
-            feature_stats,
-            positive_weight_mlp,
-            "PositiveWeightMLP",
-            split,
-        )
-        torch.manual_seed(int(settings["seed"]) + 102)
-        constrained_mlp = make_constrained_monotone_mlp_model(model_config)
-        constrained_mlp_result = _train_model(
-            config,
-            settings,
-            train_products,
-            evaluation_products,
-            feature_stats,
-            constrained_mlp,
-            "ConstrainedMonoMLP",
-            split,
-        )
-        torch.manual_seed(int(settings["seed"]))
-        monokan = make_paper_monokan_model(model_config)
-        monokan_settings = {
-            **settings,
-            "max_order_factor": float(model_config["monokan"]["max_order_factor"]),
-            "scale_action_by_history_mean": bool(model_config["monokan"]["scale_action_by_history_mean"]),
-        }
-        monokan_result = _train_model(
-            config,
-            monokan_settings,
-            train_products,
-            evaluation_products,
-            feature_stats,
-            monokan,
-            "MonoKAN",
-            split,
-            clip_imitation_predictions=False,
-        )
-        models["PenaltyMLP"] = selected_penalty["model"]
-        models["PositiveWeightMLP"] = positive_weight_mlp
-        models["ConstrainedMonoMLP"] = constrained_mlp
-        models["MonoKAN"] = monokan
-        model_action_settings["MonoKAN"] = monokan_settings
+            trained_models["ConstrainedMonoMLP"] = constrained_mlp
+        if "MonoKAN" in requested_models:
+            torch.manual_seed(int(settings["seed"]))
+            monokan = make_paper_monokan_model(model_config)
+            monokan_settings = {
+                **settings,
+                "max_order_factor": float(model_config["monokan"]["max_order_factor"]),
+                "scale_action_by_history_mean": bool(model_config["monokan"]["scale_action_by_history_mean"]),
+                "cap_excess_penalty_weight": float(model_config["monokan"].get("cap_excess_penalty_weight", 0.0)),
+                "cap_excess_samples_per_product": int(model_config["monokan"].get("cap_excess_samples_per_product", 1)),
+            }
+            monokan_result = _train_model(
+                config,
+                monokan_settings,
+                train_products,
+                evaluation_products,
+                feature_stats,
+                monokan,
+                "MonoKAN",
+                split,
+                clip_imitation_predictions=False,
+                progress=progress_callback,
+            )
+            trained_models["MonoKAN"] = monokan
+            model_action_settings["MonoKAN"] = monokan_settings
+        if "MonoKANOrderUpTo" in requested_models:
+            torch.manual_seed(int(settings["seed"]) + 301)
+            model = make_paper_order_up_to_monokan_model(model_config)
+            monokan_target_settings = {
+                **settings,
+                "max_order_factor": float(model_config["monokan"]["max_order_factor"]),
+                "scale_action_by_history_mean": bool(model_config["monokan"]["scale_action_by_history_mean"]),
+                "residual_anchor": str(model_config["monokan"].get("residual_anchor", settings.get("residual_anchor", "gamma"))),
+            }
+            result = _train_model(
+                config,
+                monokan_target_settings,
+                train_products,
+                evaluation_products,
+                feature_stats,
+                model,
+                "MonoKANOrderUpTo",
+                split,
+                progress=progress_callback,
+            )
+            trained_models["MonoKANOrderUpTo"] = model
+            model_action_settings["MonoKANOrderUpTo"] = monokan_target_settings
+            extra_models["MonoKANOrderUpTo"] = model
+            extra_results["MonoKANOrderUpTo"] = result
+        if "MonoKANResidualOrderUpTo" in requested_models:
+            torch.manual_seed(int(settings["seed"]) + 302)
+            model = make_paper_residual_order_up_to_monokan_model(model_config)
+            monokan_target_settings = {
+                **settings,
+                "max_order_factor": float(model_config["monokan"]["max_order_factor"]),
+                "scale_action_by_history_mean": bool(model_config["monokan"]["scale_action_by_history_mean"]),
+                "residual_anchor": str(model_config["monokan"].get("residual_anchor", settings.get("residual_anchor", "gamma"))),
+            }
+            result = _train_model(
+                config,
+                monokan_target_settings,
+                train_products,
+                evaluation_products,
+                feature_stats,
+                model,
+                "MonoKANResidualOrderUpTo",
+                split,
+                progress=progress_callback,
+            )
+            trained_models["MonoKANResidualOrderUpTo"] = model
+            model_action_settings["MonoKANResidualOrderUpTo"] = monokan_target_settings
+            extra_models["MonoKANResidualOrderUpTo"] = model
+            extra_results["MonoKANResidualOrderUpTo"] = result
+        if "KANResidualOrderUpTo" in requested_models:
+            torch.manual_seed(int(settings["seed"]) + 303)
+            model = make_paper_residual_order_up_to_kan_model(model_config)
+            kan_target_settings = {
+                **settings,
+                "max_order_factor": float(model_config["monokan"]["max_order_factor"]),
+                "scale_action_by_history_mean": bool(model_config["monokan"]["scale_action_by_history_mean"]),
+                "residual_anchor": str(model_config["monokan"].get("residual_anchor", settings.get("residual_anchor", "gamma"))),
+            }
+            result = _train_model(
+                config,
+                kan_target_settings,
+                train_products,
+                evaluation_products,
+                feature_stats,
+                model,
+                "KANResidualOrderUpTo",
+                split,
+                progress=progress_callback,
+            )
+            trained_models["KANResidualOrderUpTo"] = model
+            model_action_settings["KANResidualOrderUpTo"] = kan_target_settings
+            extra_models["KANResidualOrderUpTo"] = model
+            extra_results["KANResidualOrderUpTo"] = result
 
-    predictions = _prediction_table(
-        evaluation_products,
-        models,
-        feature_stats,
-        settings,
-        oracle_levels,
-        model_action_settings=model_action_settings,
-    )
-    prediction_summary = _prediction_summary(predictions)
     operational = _operational_table(
         evaluation_products,
-        models,
+        trained_models,
         feature_stats,
         settings,
         oracle_levels,
@@ -684,94 +1052,87 @@ def run_idp_benchmark(
             mean_inventory=("mean_inventory", "mean"),
         )
     )
-    summary = operational_summary.merge(prediction_summary, on="policy_name", how="left")
-    training_info = pd.DataFrame(
-        [
+    if diagnostics:
+        predictions = _prediction_table(
+            evaluation_products,
+            trained_models,
+            feature_stats,
+            settings,
+            oracle_levels,
+            model_action_settings=model_action_settings,
+        )
+        prediction_summary = _prediction_summary(predictions)
+        summary = operational_summary.merge(prediction_summary, on="policy_name", how="left")
+    else:
+        predictions = pd.DataFrame()
+        prediction_summary = pd.DataFrame()
+        summary = operational_summary
+    training_rows: list[dict[str, float | str]] = []
+    if paper_fcnn is not None and paper_fcnn_result is not None:
+        training_rows.append(
             {
                 "policy_name": "PaperFCNN",
                 "parameter_count": _parameter_count(paper_fcnn),
                 "training_seconds": paper_fcnn_result.elapsed_seconds,
                 "selected_penalty_weight": np.nan,
-            },
-        ]
-    )
+            }
+        )
     if selected_penalty is not None:
-        training_info = pd.concat(
-            [
-                training_info,
-                pd.DataFrame(
-                    [
-                        {
-                            "policy_name": "PenaltyMLP",
-                            "parameter_count": _parameter_count(selected_penalty["model"]),
-                            "training_seconds": selected_penalty["result"].elapsed_seconds,
-                            "selected_penalty_weight": selected_penalty["weight"],
-                        }
-                    ]
-                ),
-            ],
-            ignore_index=True,
+        training_rows.append(
+            {
+                "policy_name": "PenaltyMLP",
+                "parameter_count": _parameter_count(selected_penalty["model"]),
+                "training_seconds": selected_penalty["result"].elapsed_seconds,
+                "selected_penalty_weight": selected_penalty["weight"],
+            }
         )
     if positive_weight_mlp is not None and positive_weight_result is not None:
-        training_info = pd.concat(
-            [
-                training_info,
-                pd.DataFrame(
-                    [
-                        {
-                            "policy_name": "PositiveWeightMLP",
-                            "parameter_count": _parameter_count(positive_weight_mlp),
-                            "training_seconds": positive_weight_result.elapsed_seconds,
-                            "selected_penalty_weight": np.nan,
-                        }
-                    ]
-                ),
-            ],
-            ignore_index=True,
+        training_rows.append(
+            {
+                "policy_name": "PositiveWeightMLP",
+                "parameter_count": _parameter_count(positive_weight_mlp),
+                "training_seconds": positive_weight_result.elapsed_seconds,
+                "selected_penalty_weight": np.nan,
+            }
         )
     if constrained_mlp is not None and constrained_mlp_result is not None:
-        training_info = pd.concat(
-            [
-                training_info,
-                pd.DataFrame(
-                    [
-                        {
-                            "policy_name": "ConstrainedMonoMLP",
-                            "parameter_count": _parameter_count(constrained_mlp),
-                            "training_seconds": constrained_mlp_result.elapsed_seconds,
-                            "selected_penalty_weight": np.nan,
-                        }
-                    ]
-                ),
-            ],
-            ignore_index=True,
+        training_rows.append(
+            {
+                "policy_name": "ConstrainedMonoMLP",
+                "parameter_count": _parameter_count(constrained_mlp),
+                "training_seconds": constrained_mlp_result.elapsed_seconds,
+                "selected_penalty_weight": np.nan,
+            }
         )
     if monokan is not None and monokan_result is not None:
-        training_info = pd.concat(
-            [
-                training_info,
-                pd.DataFrame(
-                    [
-                        {
-                            "policy_name": "MonoKAN",
-                            "parameter_count": _parameter_count(monokan),
-                            "training_seconds": monokan_result.elapsed_seconds,
-                            "selected_penalty_weight": np.nan,
-                        }
-                    ]
-                ),
-            ],
-            ignore_index=True,
+        training_rows.append(
+            {
+                "policy_name": "MonoKAN",
+                "parameter_count": _parameter_count(monokan),
+                "training_seconds": monokan_result.elapsed_seconds,
+                "selected_penalty_weight": np.nan,
+            }
         )
+    for name, model in extra_models.items():
+        result = extra_results[name]
+        training_rows.append(
+            {
+                "policy_name": name,
+                "parameter_count": _parameter_count(model),
+                "training_seconds": result.elapsed_seconds,
+                "selected_penalty_weight": np.nan,
+            }
+        )
+    training_info = pd.DataFrame(training_rows)
     summary = summary.merge(training_info, on="policy_name", how="left")
     order_map = {name: index for index, name in enumerate(POLICY_ORDER)}
     summary["_order"] = summary["policy_name"].map(order_map)
     summary = summary.sort_values("_order").drop(columns="_order").reset_index(drop=True)
 
     logs = []
-    for name, result in [
-        ("PaperFCNN", paper_fcnn_result),
-    ]:
+    for name, result in [("PaperFCNN", paper_fcnn_result)]:
+        if result is None:
+            continue
         frame = pd.DataFrame(result.training_log or [])
         frame["policy_name"] = name
         frame["penalty_weight"] = 0.0
@@ -791,9 +1152,16 @@ def run_idp_benchmark(
         frame["policy_name"] = "ConstrainedMonoMLP"
         frame["penalty_weight"] = 0.0
         logs.append(frame)
+    for name, result in extra_results.items():
+        frame = pd.DataFrame(result.training_log or [])
+        frame["policy_name"] = name
+        frame["penalty_weight"] = 0.0
+        logs.append(frame)
     logs.extend(penalty_logs)
-    training_log = pd.concat(logs, ignore_index=True)
-    if selected_penalty is None:
+    training_log = pd.concat(logs, ignore_index=True) if logs else pd.DataFrame()
+    if training_log.empty:
+        training_log["selected"] = pd.Series(dtype=bool)
+    elif selected_penalty is None:
         training_log["selected"] = True
     else:
         training_log["selected"] = ~training_log["policy_name"].str.startswith("PenaltyMLP") | (
@@ -817,7 +1185,8 @@ def run_idp_benchmark(
     destination.mkdir(parents=True, exist_ok=True)
     model_dir = destination / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(paper_fcnn.state_dict(), model_dir / "paper_fcnn.pt")
+    if paper_fcnn is not None:
+        torch.save(paper_fcnn.state_dict(), model_dir / "paper_fcnn.pt")
     if selected_penalty is not None:
         torch.save(selected_penalty["model"].state_dict(), model_dir / "penalty_mlp.pt")
     if positive_weight_mlp is not None:
@@ -826,6 +1195,9 @@ def run_idp_benchmark(
         torch.save(constrained_mlp.state_dict(), model_dir / "constrained_monotone_mlp.pt")
     if monokan is not None:
         torch.save(monokan.state_dict(), model_dir / "monokan.pt")
+    model_filenames = checkpoint_filenames()
+    for name, model in extra_models.items():
+        torch.save(model.state_dict(), model_dir / model_filenames[name])
     summary.to_csv(destination / "summary.csv", index=False)
     table3 = _paper_table3(summary)
     table3.to_csv(destination / "paper_table3_replication.csv", index=False)
@@ -835,11 +1207,14 @@ def run_idp_benchmark(
     spline_values.to_csv(destination / "monokan_splines.csv", index=False)
     if not sample_efficiency.empty:
         sample_efficiency.to_csv(destination / "sample_efficiency.csv", index=False)
-    _save_policy_structure_plots(destination, predictions, mode)
+    if diagnostics:
+        _save_policy_structure_plots(destination, predictions, mode)
     metadata = {
         "mode": mode,
         "profile": profile,
         "split": split,
+        "requested_models": sorted(requested_models),
+        "diagnostics": diagnostics,
         "settings": settings,
         "feature_stats": {
             "demand_scale": feature_stats.demand_scale,

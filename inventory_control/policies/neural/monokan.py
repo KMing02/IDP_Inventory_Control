@@ -90,6 +90,8 @@ class HermiteKANLayer(nn.Module):
         grid: int = 5,
         grid_range: tuple[float, float] = (-2.0, 4.0),
         noise_scale: float = 0.01,
+        base_scale_init: float | None = None,
+        spline_scale_init: float | None = None,
     ) -> None:
         super().__init__()
         self.in_dim = int(in_dim)
@@ -103,8 +105,10 @@ class HermiteKANLayer(nn.Module):
         coef[:, :, 0] = noise_scale * torch.randn(self.num_edges, self.num_grid_intervals + 1)
         self.coef = nn.Parameter(coef)
         edge_scale = 1.0 / max(self.in_dim, 1)
-        self.scale_base = nn.Parameter(torch.full((self.num_edges,), edge_scale))
-        self.scale_spline = nn.Parameter(torch.full((self.num_edges,), edge_scale))
+        self.scale_base = nn.Parameter(torch.full((self.num_edges,), edge_scale if base_scale_init is None else float(base_scale_init)))
+        self.scale_spline = nn.Parameter(
+            torch.full((self.num_edges,), edge_scale if spline_scale_init is None else float(spline_scale_init))
+        )
         self.bias = nn.Parameter(torch.zeros(self.out_dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -164,6 +168,12 @@ class MonoKANPolicy(nn.Module):
         hidden_layers: int = 1,
         grid: int = 5,
         grid_range: tuple[float, float] = (-2.0, 4.0),
+        noise_scale: float = 0.01,
+        base_scale_init: float | None = None,
+        spline_scale_init: float | None = None,
+        bounded_base_scale_init: float | None = None,
+        bounded_spline_scale_init: float = 1.0,
+        bounded_spline_slope_init: float = 1.0,
         monotonic_vars: dict[int, int] | None = None,
         initial_normalized_order: float = 0.5,
         output_upper_bound: float | None = None,
@@ -171,12 +181,23 @@ class MonoKANPolicy(nn.Module):
         super().__init__()
         self.monotonic_vars = dict(monotonic_vars or {})
         self.output_upper_bound = float(output_upper_bound) if output_upper_bound is not None else None
+        self.bounded_base_scale_init = bounded_base_scale_init
+        self.bounded_spline_scale_init = float(bounded_spline_scale_init)
+        self.bounded_spline_slope_init = float(bounded_spline_slope_init)
         if self.output_upper_bound is not None and self.output_upper_bound <= 0:
             raise ValueError("output_upper_bound must be positive")
         widths = [int(input_dim)] + [int(hidden_units)] * int(hidden_layers) + [1]
         self.layers = nn.ModuleList(
             [
-                HermiteKANLayer(widths[index], widths[index + 1], grid=grid, grid_range=grid_range)
+                HermiteKANLayer(
+                    widths[index],
+                    widths[index + 1],
+                    grid=grid,
+                    grid_range=grid_range,
+                    noise_scale=noise_scale,
+                    base_scale_init=base_scale_init,
+                    spline_scale_init=spline_scale_init,
+                )
                 for index in range(len(widths) - 1)
             ]
         )
@@ -189,9 +210,10 @@ class MonoKANPolicy(nn.Module):
     def _initialize_bounded_layers(self) -> None:
         """Use expressive spline scales when the paper action bound controls output scale."""
         for layer in self.layers:
-            layer.coef[:, :, 1].fill_(1.0)
-            layer.scale_base.copy_(torch.ones_like(layer.scale_base) / max(layer.in_dim, 1) ** 0.5)
-            layer.scale_spline.fill_(1.0)
+            layer.coef[:, :, 1].fill_(self.bounded_spline_slope_init)
+            base_scale = 1.0 / max(layer.in_dim, 1) ** 0.5 if self.bounded_base_scale_init is None else self.bounded_base_scale_init
+            layer.scale_base.copy_(torch.full_like(layer.scale_base, float(base_scale)))
+            layer.scale_spline.fill_(self.bounded_spline_scale_init)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """Return non-negative normalized order quantity."""
@@ -323,10 +345,131 @@ def make_paper_monokan_model(config: dict, metadata: dict | None = None) -> Mono
         hidden_units=int(source.get("hidden_units", config.get("monokan", {}).get("hidden_units", 16))),
         grid=int(source.get("grid", config.get("monokan", {}).get("grid", 5))),
         grid_range=tuple(source.get("grid_range", config.get("monokan", {}).get("grid_range", [-2.0, 4.0]))),
+        noise_scale=float(source.get("noise_scale", config.get("monokan", {}).get("noise_scale", 0.01))),
+        base_scale_init=_optional_float(source.get("base_scale_init", config.get("monokan", {}).get("base_scale_init"))),
+        spline_scale_init=_optional_float(source.get("spline_scale_init", config.get("monokan", {}).get("spline_scale_init"))),
+        bounded_base_scale_init=_optional_float(
+            source.get("bounded_base_scale_init", config.get("monokan", {}).get("bounded_base_scale_init"))
+        ),
+        bounded_spline_scale_init=float(
+            source.get("bounded_spline_scale_init", config.get("monokan", {}).get("bounded_spline_scale_init", 1.0))
+        ),
+        bounded_spline_slope_init=float(
+            source.get("bounded_spline_slope_init", config.get("monokan", {}).get("bounded_spline_slope_init", 1.0))
+        ),
         monotonic_vars={0: -1},
         initial_normalized_order=float(source.get("initial_normalized_order", 0.5 * max_order_factor)),
         output_upper_bound=max_order_factor,
     )
+
+
+def make_paper_order_up_to_monokan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
+    """Build a MonoKAN model that predicts a normalized order-up-to target."""
+    source = metadata or config.get("monokan", {})
+    history_length = int(source.get("history_length_H", config["history_length_H"]))
+    max_order_factor = float(
+        source.get(
+            "max_order_factor",
+            config.get("monokan", {}).get("max_order_factor", config.get("fcnn", {}).get("max_order_factor", 2.0)),
+        )
+    )
+    model = MonoKANPolicy(
+        input_dim=history_length + 4,
+        hidden_layers=int(source.get("hidden_layers", config.get("monokan", {}).get("hidden_layers", 1))),
+        hidden_units=int(source.get("hidden_units", config.get("monokan", {}).get("hidden_units", 16))),
+        grid=int(source.get("grid", config.get("monokan", {}).get("grid", 5))),
+        grid_range=tuple(source.get("grid_range", config.get("monokan", {}).get("grid_range", [-2.0, 4.0]))),
+        noise_scale=float(source.get("noise_scale", config.get("monokan", {}).get("noise_scale", 0.01))),
+        base_scale_init=_optional_float(source.get("base_scale_init", config.get("monokan", {}).get("base_scale_init"))),
+        spline_scale_init=_optional_float(source.get("spline_scale_init", config.get("monokan", {}).get("spline_scale_init"))),
+        bounded_base_scale_init=_optional_float(
+            source.get("bounded_base_scale_init", config.get("monokan", {}).get("bounded_base_scale_init"))
+        ),
+        bounded_spline_scale_init=float(
+            source.get("bounded_spline_scale_init", config.get("monokan", {}).get("bounded_spline_scale_init", 1.0))
+        ),
+        bounded_spline_slope_init=float(
+            source.get("bounded_spline_slope_init", config.get("monokan", {}).get("bounded_spline_slope_init", 1.0))
+        ),
+        monotonic_vars={},
+        initial_normalized_order=float(source.get("initial_normalized_target", 0.5 * max_order_factor)),
+        output_upper_bound=max_order_factor,
+    )
+    model.paper_action_parameterization = "order_up_to"
+    model.paper_scale_target_by_history_mean = bool(source.get("scale_action_by_history_mean", True))
+    return model
+
+
+def make_paper_residual_order_up_to_monokan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
+    """Build a MonoKAN model that predicts a residual over historical base stock."""
+    return _make_paper_residual_order_up_to_kan_model(config, metadata=metadata, monotonic_vars="context")
+
+
+def make_paper_residual_order_up_to_kan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
+    """Build an unconstrained KAN residual model for MONOkan ablations."""
+    return _make_paper_residual_order_up_to_kan_model(config, metadata=metadata, monotonic_vars={})
+
+
+def _make_paper_residual_order_up_to_kan_model(
+    config: dict,
+    monotonic_vars: dict[int, int] | str,
+    metadata: dict | None = None,
+) -> MonoKANPolicy:
+    """Build a residual order-up-to KAN model with optional monotonic constraints."""
+    source = metadata or config.get("monokan", {})
+    history_length = int(source.get("history_length_H", config["history_length_H"]))
+    resolved_monotonic_vars = _paper_context_monotonic_vars(history_length) if monotonic_vars == "context" else dict(monotonic_vars)
+    model = MonoKANPolicy(
+        input_dim=history_length + 4,
+        hidden_layers=int(source.get("hidden_layers", config.get("monokan", {}).get("hidden_layers", 1))),
+        hidden_units=int(source.get("hidden_units", config.get("monokan", {}).get("hidden_units", 16))),
+        grid=int(source.get("grid", config.get("monokan", {}).get("grid", 5))),
+        grid_range=tuple(source.get("grid_range", config.get("monokan", {}).get("grid_range", [-2.0, 4.0]))),
+        noise_scale=float(source.get("noise_scale", config.get("monokan", {}).get("noise_scale", 0.01))),
+        base_scale_init=_optional_float(source.get("base_scale_init", config.get("monokan", {}).get("base_scale_init"))),
+        spline_scale_init=_optional_float(source.get("spline_scale_init", config.get("monokan", {}).get("spline_scale_init"))),
+        bounded_base_scale_init=_optional_float(
+            source.get("bounded_base_scale_init", config.get("monokan", {}).get("bounded_base_scale_init"))
+        ),
+        bounded_spline_scale_init=float(
+            source.get("bounded_spline_scale_init", config.get("monokan", {}).get("bounded_spline_scale_init", 1.0))
+        ),
+        bounded_spline_slope_init=float(
+            source.get("bounded_spline_slope_init", config.get("monokan", {}).get("bounded_spline_slope_init", 1.0))
+        ),
+        monotonic_vars=resolved_monotonic_vars,
+        initial_normalized_order=float(source.get("initial_residual_center", 1.0)),
+        output_upper_bound=2.0,
+    )
+    model.paper_action_parameterization = "residual_order_up_to"
+    model.paper_residual_center = 1.0
+    model.paper_residual_scale = float(source.get("residual_scale", 0.5))
+    model.paper_residual_anchor = str(source.get("residual_anchor", "gamma"))
+    return model
+
+
+def _paper_context_monotonic_vars(history_length: int) -> dict[int, int]:
+    """Return structural directions for context-only target-stock prediction.
+
+    Context features are historical demand followed by price, purchase cost,
+    holding cost, and lost-sale penalty. Higher observed demand, selling price,
+    and lost-sale penalty should not reduce the target stock; higher purchase
+    and holding cost should not increase it.
+    """
+    directions = {index: 1 for index in range(int(history_length))}
+    directions.update(
+        {
+            int(history_length): 1,
+            int(history_length) + 1: -1,
+            int(history_length) + 2: -1,
+            int(history_length) + 3: 1,
+        }
+    )
+    return directions
+
+
+def _optional_float(value) -> float | None:
+    return None if value is None else float(value)
 
 
 def monokan_inventory_violation_rate(

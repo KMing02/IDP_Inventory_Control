@@ -62,6 +62,44 @@ class FirstMonotoneLinear(nn.Module):
         return torch.nn.functional.linear(features, self.effective_weight(), self.bias)
 
 
+class FirstPartialMonotoneLinear(nn.Module):
+    """Linear layer with selected input columns constrained by sign."""
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        monotonic_vars: dict[int, int],
+    ) -> None:
+        super().__init__()
+        for feature, direction in monotonic_vars.items():
+            if feature < 0 or feature >= in_features:
+                raise ValueError(f"monotonic feature={feature} is outside in_features={in_features}")
+            if direction not in {-1, 1}:
+                raise ValueError("monotonic directions must be -1 or 1")
+        self.in_features = int(in_features)
+        self.out_features = int(out_features)
+        self.monotonic_vars = {int(feature): int(direction) for feature, direction in monotonic_vars.items()}
+        self.raw_weight = nn.Parameter(torch.empty(out_features, in_features))
+        self.bias = nn.Parameter(torch.zeros(out_features))
+        nn.init.xavier_uniform_(self.raw_weight)
+
+    def effective_weight(self) -> torch.Tensor:
+        """Return the sign-constrained weight matrix used in forward passes."""
+        columns = []
+        for feature in range(self.in_features):
+            raw_column = self.raw_weight[:, feature : feature + 1]
+            if feature in self.monotonic_vars:
+                columns.append(self.monotonic_vars[feature] * torch.nn.functional.softplus(raw_column))
+            else:
+                columns.append(raw_column)
+        return torch.cat(columns, dim=1)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """Apply the sign-constrained affine map."""
+        return torch.nn.functional.linear(features, self.effective_weight(), self.bias)
+
+
 class NonnegativeLinear(nn.Module):
     """Linear layer whose weights are nonnegative by parameterization."""
 
@@ -180,6 +218,59 @@ class ConstrainedMonotoneMLP(nn.Module):
         return [layer.effective_weight() for layer in self.network if isinstance(layer, NonnegativeLinear)]
 
 
+class PartialContextMonotoneMLP(nn.Module):
+    """Partially monotone MLP over context features for target-stock residuals."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        monotonic_vars: dict[int, int],
+        hidden_layers: int = 2,
+        hidden_units: int = 32,
+        activation: str = "ELU",
+        mixed_activation: bool = True,
+        output: str = "signed",
+    ) -> None:
+        super().__init__()
+        if hidden_layers < 1:
+            raise ValueError("PartialContextMonotoneMLP requires at least one hidden layer")
+        self.input_dim = int(input_dim)
+        self.monotonic_vars = {int(feature): int(direction) for feature, direction in monotonic_vars.items()}
+        self.output = str(output)
+        layers: list[nn.Module] = [
+            FirstPartialMonotoneLinear(
+                self.input_dim,
+                int(hidden_units),
+                self.monotonic_vars,
+            )
+        ]
+        activation_layer = MonotoneActivation(activation, mixed=mixed_activation)
+        layers.append(activation_layer)
+        previous_dim = activation_layer.output_dim(int(hidden_units))
+        for _ in range(int(hidden_layers) - 1):
+            layers.append(NonnegativeLinear(previous_dim, int(hidden_units)))
+            activation_layer = MonotoneActivation(activation, mixed=mixed_activation)
+            layers.append(activation_layer)
+            previous_dim = activation_layer.output_dim(int(hidden_units))
+        layers.append(NonnegativeLinear(previous_dim, 1))
+        self.network = nn.ModuleList(layers)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """Return a context-dependent scalar."""
+        context = features[:, -self.input_dim :]
+        values = context
+        for layer in self.network:
+            values = layer(values)
+        raw = values.squeeze(-1)
+        if self.output == "signed":
+            return torch.tanh(raw)
+        return torch.nn.functional.softplus(raw)
+
+    def apply_monotonic_constraints(self) -> None:
+        """Compatibility hook; constraints are enforced by parameterization."""
+        return None
+
+
 def _constrained_mlp_source(config: dict, metadata: dict | None, key: str) -> dict:
     if metadata is not None:
         return metadata
@@ -218,3 +309,35 @@ def make_positive_weight_mlp_model(config: dict, metadata: dict | None = None) -
         monotonic_feature=int(source.get("monotonic_feature", 0)),
         monotonic_direction=int(source.get("monotonic_direction", -1)),
     )
+
+
+def make_paper_residual_order_up_to_constrained_mlp_model(
+    config: dict,
+    metadata: dict | None = None,
+) -> PartialContextMonotoneMLP:
+    """Build a context-monotone MLP residual target-stock comparator."""
+    source = _constrained_mlp_source(config, metadata, "constrained_monotone_mlp")
+    history_length = int(source.get("history_length_H", config["history_length_H"]))
+    monotonic_vars = {index: 1 for index in range(history_length)}
+    monotonic_vars.update(
+        {
+            history_length: 1,
+            history_length + 1: -1,
+            history_length + 2: -1,
+            history_length + 3: 1,
+        }
+    )
+    model = PartialContextMonotoneMLP(
+        input_dim=history_length + 4,
+        monotonic_vars=monotonic_vars,
+        hidden_layers=int(source.get("hidden_layers", 2)),
+        hidden_units=int(source.get("hidden_units", 32)),
+        activation=str(source.get("activation", "ELU")),
+        mixed_activation=bool(source.get("mixed_activation", True)),
+        output="signed",
+    )
+    model.paper_action_parameterization = "residual_order_up_to"
+    model.paper_residual_center = 0.0
+    model.paper_residual_scale = float(source.get("residual_scale", config.get("fcnn", {}).get("residual_scale", 0.5)))
+    model.paper_residual_anchor = str(source.get("residual_anchor", config.get("fcnn", {}).get("residual_anchor", "gamma")))
+    return model

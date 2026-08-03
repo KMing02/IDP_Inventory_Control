@@ -128,6 +128,43 @@ class PaperCausalCNNPolicy(nn.Module):
         return torch.nn.functional.softplus(self.mlp(mlp_input)).squeeze(-1)
 
 
+class PaperContextMLPPolicy(nn.Module):
+    """MLP over demand history and economics, excluding current inventory."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_layers: int = 2,
+        hidden_units: int = 32,
+        activation: str = "ELU",
+        output: str = "positive",
+        output_upper_bound: float | None = None,
+    ) -> None:
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.output = output
+        self.output_upper_bound = float(output_upper_bound) if output_upper_bound is not None else None
+        activation_cls = getattr(nn, activation)
+        layers: list[nn.Module] = []
+        previous_dim = self.input_dim
+        for _ in range(hidden_layers):
+            layers.append(nn.Linear(previous_dim, hidden_units))
+            layers.append(activation_cls())
+            previous_dim = hidden_units
+        layers.append(nn.Linear(previous_dim, 1))
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """Return a context-dependent scalar, ignoring inventory when present."""
+        context = features[:, -self.input_dim :]
+        raw = self.network(context).squeeze(-1)
+        if self.output == "signed":
+            return torch.tanh(raw)
+        if self.output_upper_bound is not None:
+            return self.output_upper_bound * torch.sigmoid(raw)
+        return torch.nn.functional.softplus(raw)
+
+
 def make_paper_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Module:
     """Build the configured paper policy model."""
     source = metadata or config["fcnn"]
@@ -151,6 +188,40 @@ def make_paper_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Modu
         hidden_units=hidden_units,
         activation=activation,
     )
+
+
+def make_paper_order_up_to_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Module:
+    """Build an FCNN that predicts a normalized order-up-to target."""
+    source = metadata or config["fcnn"]
+    history_length = int(metadata.get("history_length_H", config["history_length_H"])) if metadata else int(config["history_length_H"])
+    model = PaperContextMLPPolicy(
+        input_dim=history_length + 4,
+        hidden_layers=int(source.get("hidden_layers", config["fcnn"]["hidden_layers"])),
+        hidden_units=int(source.get("hidden_units", config["fcnn"]["hidden_units"])),
+        activation=str(source.get("activation", config["fcnn"]["activation"])),
+        output="positive",
+        output_upper_bound=float(source.get("max_order_factor", config["fcnn"].get("max_order_factor", 4.0))),
+    )
+    model.paper_action_parameterization = "order_up_to"
+    model.paper_scale_target_by_history_mean = bool(source.get("scale_action_by_history_mean", True))
+    return model
+
+
+def make_paper_residual_order_up_to_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Module:
+    """Build an FCNN that predicts a residual correction to historical base stock."""
+    source = metadata or config["fcnn"]
+    history_length = int(metadata.get("history_length_H", config["history_length_H"])) if metadata else int(config["history_length_H"])
+    model = PaperContextMLPPolicy(
+        input_dim=history_length + 4,
+        hidden_layers=int(source.get("hidden_layers", config["fcnn"]["hidden_layers"])),
+        hidden_units=int(source.get("hidden_units", config["fcnn"]["hidden_units"])),
+        activation=str(source.get("activation", config["fcnn"]["activation"])),
+        output="signed",
+    )
+    model.paper_action_parameterization = "residual_order_up_to"
+    model.paper_residual_scale = float(source.get("residual_scale", 0.5))
+    model.paper_residual_anchor = str(source.get("residual_anchor", "gamma"))
+    return model
 
 
 def build_paper_lost_sales_features(

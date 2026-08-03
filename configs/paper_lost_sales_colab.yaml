@@ -12,6 +12,7 @@ batch_size: 1024
 epochs: 500
 optimizer: Adam
 learning_rate: 0.001
+include_terminal_salvage: false
 
 fcnn:
   history_encoder: causal_cnn
