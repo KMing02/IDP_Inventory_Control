@@ -98,6 +98,8 @@ class IDPBenchmarkArtifacts:
     predictions: pd.DataFrame
     training_log: pd.DataFrame
     spline_values: pd.DataFrame
+    target_structure: pd.DataFrame
+    spline_certification: pd.DataFrame
     sample_efficiency: pd.DataFrame | None = None
 
 
@@ -576,7 +578,16 @@ def _prediction_summary(predictions: pd.DataFrame) -> pd.DataFrame:
                 "mae": float(np.mean(np.abs(errors))),
                 "rmse": float(np.sqrt(np.mean(errors**2))),
                 "order_up_to_mae": float(np.mean(np.abs(order_up_to_errors))),
+                "order_up_to_bias": float(np.mean(order_up_to_errors)),
                 "order_up_to_rmse": float(np.sqrt(np.mean(order_up_to_errors**2))),
+                "raw_order_mean": float(policy_rows["raw_order"].mean()),
+                "deployed_order_mean": float(policy_rows["deployed_order"].mean()),
+                "cap_hit_rate": float(
+                    np.mean(
+                        policy_rows["raw_order"].to_numpy(dtype=float)
+                        >= policy_rows["deployed_order"].to_numpy(dtype=float) + 1e-6
+                    )
+                ),
                 "raw_violation_rate": float(np.mean(raw_increases > 1e-6)),
                 "deployed_violation_rate": float(np.mean(deployed_increases > 1e-6)),
                 "raw_max_violation": float(raw_increases.max(initial=0.0)),
@@ -586,6 +597,129 @@ def _prediction_summary(predictions: pd.DataFrame) -> pd.DataFrame:
                 "inactive_slope_deviation_from_zero": inactive_slope_deviation,
             }
         )
+    return pd.DataFrame(rows)
+
+
+def _target_level_from_context(model: nn.Module, batch: dict[str, torch.Tensor], context: torch.Tensor) -> torch.Tensor:
+    """Decode a target-stock level from prebuilt context features."""
+    parameterization = getattr(model, "paper_action_parameterization", "raw")
+    historical_mean = torch.clamp(batch["historical_mean_demand"], min=1.0)
+    if parameterization == "order_up_to":
+        target_factor = model(context)
+        if bool(getattr(model, "paper_scale_target_by_history_mean", True)):
+            return target_factor * historical_mean
+        return target_factor
+    if parameterization == "residual_order_up_to":
+        residual_factor = model(context)
+        residual_center = float(getattr(model, "paper_residual_center", 0.0))
+        residual_scale = float(getattr(model, "paper_residual_scale", 0.5))
+        return batch["historical_base_stock_level"] + residual_scale * (residual_factor - residual_center) * historical_mean
+    raise ValueError(f"Model parameterization {parameterization!r} does not predict a context target level")
+
+
+def _context_feature_specs(history_length: int) -> list[dict[str, Any]]:
+    return [
+        {"feature": "demand_level", "direction": 1, "indices": list(range(history_length)), "step": 0.05},
+        {"feature": "price", "direction": 1, "indices": [history_length], "step": 0.02},
+        {"feature": "purchase_cost", "direction": -1, "indices": [history_length + 1], "step": 0.02},
+        {"feature": "holding_cost", "direction": -1, "indices": [history_length + 2], "step": 0.02},
+        {"feature": "lost_sale_penalty", "direction": 1, "indices": [history_length + 3], "step": 0.02},
+    ]
+
+
+def _target_structure_diagnostics(
+    products: list[PaperLostSalesProduct],
+    models: dict[str, nn.Module],
+    feature_stats: PaperFCNNFeatureStats,
+    settings: dict[str, Any],
+) -> pd.DataFrame:
+    """Measure target-stock comparative statics for context-only policies."""
+    eligible = {
+        name: model
+        for name, model in models.items()
+        if getattr(model, "paper_action_parameterization", "raw") in {"order_up_to", "residual_order_up_to"}
+    }
+    if not products or not eligible:
+        return pd.DataFrame()
+    device = infer_model_device(next(iter(eligible.values())))
+    batch = make_paper_lost_sales_training_batch(
+        products,
+        horizon=1,
+        generator=torch.Generator().manual_seed(int(settings["seed"]) + 77_000),
+        feature_stats=feature_stats,
+        residual_anchor=str(settings.get("residual_anchor", "gamma")),
+    )
+    batch = {key: value.to(device) for key, value in batch.items()}
+    history_length = int(batch["history"].shape[1])
+    specs = _context_feature_specs(history_length)
+    rows: list[dict[str, float | str | int]] = []
+    for name, model in eligible.items():
+        model.to(device)
+        model.eval()
+        with torch.no_grad():
+            context = paper_lost_sales_context_features(batch)
+            base_target = _target_level_from_context(model, batch, context)
+            anchor = batch["historical_base_stock_level"]
+            historical_mean = torch.clamp(batch["historical_mean_demand"], min=1.0)
+            correction = base_target - anchor
+            correction_abs = torch.abs(correction)
+            correction_threshold = 0.1 * historical_mean
+        for spec in specs:
+            context_hi = context.detach().clone()
+            context_hi[:, spec["indices"]] += float(spec["step"])
+            with torch.no_grad():
+                hi_target = _target_level_from_context(model, batch, context_hi)
+            diff = hi_target - base_target
+            wrong_direction = torch.clamp(-float(spec["direction"]) * diff, min=0.0)
+            context_grad = context.detach().clone().requires_grad_(True)
+            grad_target = _target_level_from_context(model, batch, context_grad)
+            selected = torch.autograd.grad(grad_target.sum(), context_grad, retain_graph=False)[0][:, spec["indices"]]
+            directional_grad = float(spec["direction"]) * selected.sum(dim=1)
+            rows.append(
+                {
+                    "policy_name": name,
+                    "feature": str(spec["feature"]),
+                    "expected_direction": int(spec["direction"]),
+                    "finite_diff_step": float(spec["step"]),
+                    "finite_diff_violation_rate": float(torch.mean((wrong_direction > 1e-6).float()).item()),
+                    "finite_diff_max_wrong_direction": float(wrong_direction.max().item()),
+                    "autograd_min_directional_derivative": float(directional_grad.min().item()),
+                    "autograd_mean_directional_derivative": float(directional_grad.mean().item()),
+                    "autograd_violation_rate": float(torch.mean((directional_grad < -1e-6).float()).item()),
+                    "target_stock_mean": float(base_target.mean().item()),
+                    "residual_correction_abs_mean": float(correction_abs.mean().item()),
+                    "residual_correction_abs_p90": float(torch.quantile(correction_abs, 0.9).item()),
+                    "residual_correction_large_rate": float(torch.mean((correction_abs > correction_threshold).float()).item()),
+                    "products": len(products),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _monokan_spline_certification(models: dict[str, nn.Module], samples: int = 200) -> pd.DataFrame:
+    """Certify sampled first-layer edge directions for constrained MonoKAN inputs."""
+    rows: list[dict[str, float | str | int]] = []
+    for name, model in models.items():
+        if not isinstance(model, MonoKANPolicy) or not model.monotonic_vars:
+            continue
+        for feature_index, direction in sorted(model.monotonic_vars.items()):
+            x_values, edge_values = sample_monokan_first_layer_splines(model, feature_index=feature_index, samples=samples)
+            del x_values
+            increments = torch.diff(edge_values, dim=1)
+            wrong_direction = torch.clamp(-float(direction) * increments, min=0.0)
+            rows.append(
+                {
+                    "policy_name": name,
+                    "feature_index": int(feature_index),
+                    "expected_direction": int(direction),
+                    "edges": int(edge_values.shape[0]),
+                    "intervals": int(increments.numel()),
+                    "violating_interval_rate": float(torch.mean((wrong_direction > 1e-6).float()).item()),
+                    "max_wrong_direction_increment": float(wrong_direction.max().item()),
+                    "domain_min": float(model.layers[0].grid[:, 0].min().item()),
+                    "domain_max": float(model.layers[0].grid[:, -1].max().item()),
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -1169,18 +1303,35 @@ def run_idp_benchmark(
         )
 
     spline_rows = []
-    if monokan is not None:
-        spline_x, spline_values_tensor = sample_monokan_first_layer_splines(monokan, feature_index=0, samples=100)
-        for unit_index, values in enumerate(spline_values_tensor.numpy()):
-            for x_value, spline_value in zip(spline_x.numpy(), values):
-                spline_rows.append(
-                    {
-                        "hidden_unit": unit_index,
-                        "inventory_feature": float(x_value),
-                        "edge_value": float(spline_value),
-                    }
+    if diagnostics:
+        for name, model in trained_models.items():
+            if not isinstance(model, MonoKANPolicy) or not model.monotonic_vars:
+                continue
+            for feature_index in sorted(model.monotonic_vars):
+                spline_x, spline_values_tensor = sample_monokan_first_layer_splines(
+                    model,
+                    feature_index=feature_index,
+                    samples=100,
                 )
+                for unit_index, values in enumerate(spline_values_tensor.numpy()):
+                    for x_value, spline_value in zip(spline_x.numpy(), values):
+                        spline_rows.append(
+                            {
+                                "policy_name": name,
+                                "feature_index": int(feature_index),
+                                "hidden_unit": unit_index,
+                                "feature_value": float(x_value),
+                                "edge_value": float(spline_value),
+                            }
+                        )
     spline_values = pd.DataFrame(spline_rows)
+    diagnostic_products = evaluation_products[: int(settings.get("order_up_to_products", len(evaluation_products)))]
+    target_structure = (
+        _target_structure_diagnostics(diagnostic_products, trained_models, feature_stats, settings)
+        if diagnostics
+        else pd.DataFrame()
+    )
+    spline_certification = _monokan_spline_certification(trained_models) if diagnostics else pd.DataFrame()
 
     destination.mkdir(parents=True, exist_ok=True)
     model_dir = destination / "models"
@@ -1205,6 +1356,8 @@ def run_idp_benchmark(
     predictions.to_csv(destination / "predictions.csv", index=False)
     training_log.to_csv(destination / "training_log.csv", index=False)
     spline_values.to_csv(destination / "monokan_splines.csv", index=False)
+    target_structure.to_csv(destination / "target_structure_diagnostics.csv", index=False)
+    spline_certification.to_csv(destination / "monokan_spline_certification.csv", index=False)
     if not sample_efficiency.empty:
         sample_efficiency.to_csv(destination / "sample_efficiency.csv", index=False)
     if diagnostics:
@@ -1238,6 +1391,8 @@ def run_idp_benchmark(
         predictions=predictions,
         training_log=training_log,
         spline_values=spline_values,
+        target_structure=target_structure,
+        spline_certification=spline_certification,
         sample_efficiency=sample_efficiency if not sample_efficiency.empty else None,
     )
 

@@ -50,6 +50,8 @@ def test_prediction_summary_reports_accuracy_and_monotonicity() -> None:
     assert summary["raw_max_violation"] == 1.0
     assert summary["deployed_max_violation"] == 0.5
     assert summary["order_up_to_mae"] == 1.0
+    assert summary["order_up_to_bias"] == -1.0
+    assert summary["cap_hit_rate"] == pytest.approx(1 / 3)
     assert summary["active_slope_deviation_from_minus_one"] == pytest.approx(1.5)
     assert summary["inactive_slope_deviation_from_zero"] == pytest.approx(1.5)
 
@@ -309,6 +311,8 @@ def test_compact_idp_benchmark_smoke(tmp_path: Path) -> None:
         "predictions.csv",
         "training_log.csv",
         "monokan_splines.csv",
+        "target_structure_diagnostics.csv",
+        "monokan_spline_certification.csv",
         "metadata.json",
     ]:
         assert (tmp_path / filename).exists()
@@ -327,6 +331,37 @@ def test_replicate_ls_mode_smoke(tmp_path: Path) -> None:
         set(artifacts.summary["policy_name"])
     )
     assert (tmp_path / "paper_table3_replication.csv").exists()
+
+
+def test_residual_comparison_exports_structure_diagnostics(tmp_path: Path) -> None:
+    artifacts = run_idp_benchmark(
+        config_path="configs/paper_lost_sales_debug.yaml",
+        profile="compact",
+        mode="structure-ls",
+        output_dir=tmp_path,
+        models=[
+            "PaperFCNNResidualOrderUpTo",
+            "KANResidualOrderUpTo",
+            "ConstrainedMLPResidualOrderUpTo",
+            "MonoKANResidualOrderUpTo",
+        ],
+    )
+
+    expected = {
+        "PaperFCNNResidualOrderUpTo",
+        "KANResidualOrderUpTo",
+        "ConstrainedMLPResidualOrderUpTo",
+        "MonoKANResidualOrderUpTo",
+    }
+    assert expected.issubset(set(artifacts.summary["policy_name"]))
+    assert expected.issubset(set(artifacts.target_structure["policy_name"]))
+    assert {"finite_diff_violation_rate", "autograd_violation_rate", "residual_correction_abs_mean"}.issubset(
+        artifacts.target_structure.columns
+    )
+    assert set(artifacts.spline_certification["policy_name"]) == {"MonoKANResidualOrderUpTo"}
+    assert (tmp_path / "models" / "constrained_mlp_residual_order_up_to.pt").exists()
+    assert (tmp_path / "target_structure_diagnostics.csv").exists()
+    assert (tmp_path / "monokan_spline_certification.csv").exists()
 
 
 def test_sample_efficiency_mode_smoke(tmp_path: Path) -> None:
