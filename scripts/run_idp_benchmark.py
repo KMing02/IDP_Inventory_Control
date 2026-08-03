@@ -23,7 +23,18 @@ def main() -> None:
     parser.add_argument("--final-test", action="store_true", help="Required for held-out test evaluation.")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--models",
+        help="Comma-separated trainable policies to run, e.g. PaperFCNN or PaperFCNN,MonoKAN. Defaults to all.",
+    )
+    parser.add_argument("--progress", action="store_true", help="Print per-model and validation progress.")
+    parser.add_argument(
+        "--fast-diagnostics",
+        action="store_true",
+        help="Skip prediction-grid diagnostics, spline export, and structure plots.",
+    )
     args = parser.parse_args()
+    selected_models = [model.strip() for model in args.models.split(",")] if args.models else None
 
     artifacts = run_idp_benchmark(
         config_path=args.config,
@@ -32,6 +43,9 @@ def main() -> None:
         split=args.split,
         final_test=args.final_test,
         output_dir=args.output_dir,
+        models=selected_models,
+        progress=args.progress,
+        diagnostics=not args.fast_diagnostics,
     )
     print(artifacts.summary.to_string(index=False))
     print(f"saved_artifacts={artifacts.output_dir}")
