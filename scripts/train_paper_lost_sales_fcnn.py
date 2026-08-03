@@ -1,4 +1,8 @@
-"""Train FCNN for Maggiar-style lost-sales replication."""
+"""Legacy raw-action FCNN training diagnostic.
+
+Prefer `scripts/run_idp_benchmark.py` with residual order-up-to models for new
+comparative experiments.
+"""
 
 from __future__ import annotations
 

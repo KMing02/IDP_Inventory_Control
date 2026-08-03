@@ -14,6 +14,7 @@ build/
 dist/
 *.egg-info/
 outputs/
+output/
 outputs/**/*.csv
 outputs/**/*.png
 outputs/**/*.pdf
@@ -25,6 +26,7 @@ outputs/**/*.ckpt
 *.ckpt
 .ipynb_checkpoints/
 .DS_Store
+docs/*.pdf
 IDP_Inventory_Control/
 third_party/
 idinn-main/

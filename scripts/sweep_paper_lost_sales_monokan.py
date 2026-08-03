@@ -1,4 +1,8 @@
-"""Validation-only sweep for adapted MonoKAN paper lost-sales policies."""
+"""Legacy raw-action MonoKAN validation sweep.
+
+Prefer `scripts/run_monokan_optimization_sweep.py` and the residual order-up-to
+benchmark path for current MONOkan experiments.
+"""
 
 from __future__ import annotations
 

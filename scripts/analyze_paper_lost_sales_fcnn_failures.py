@@ -1,4 +1,8 @@
-"""Compare paper lost-sales FCNN against base-stock baselines."""
+"""Legacy raw-action FCNN failure analysis.
+
+Prefer residual order-up-to benchmark summaries for current architecture
+comparisons.
+"""
 
 from __future__ import annotations
 

@@ -1,29 +1,38 @@
 # Structure-Informed Neural Inventory Control Benchmark
 
-This repository is a research codebase for structure-informed neural inventory control. The goal is to compare neural policy architectures, including unconstrained FCNNs, MonoKAN, and optionally MLPs with monotonicity penalties.
+This repository is a research codebase for structure-informed neural inventory control. The current primary workflow compares residual order-up-to neural policies for a paper-style lost-sales benchmark.
 
 This is not a generic reinforcement learning benchmark. The intended training direction is DirectBackprop-style differentiable policy optimization through inventory simulators, where domain structure is injected through inventory balance equations, lead-time pipeline states, monotonicity of order quantities with respect to inventory position, and classical heuristic baselines.
 
 The current priority is replicating the lost-sales setting from Maggiar et al. (2025), "Structure-Informed Deep Reinforcement Learning for Inventory Management". Generic benchmark scenarios remain in the repository, but they are secondary until the lost-sales replication is stable.
 
-The current implementation includes clean true simulators, demand processes, heuristic baselines, evaluation, plotting, tests, a paper-style lost-sales replication layer, an unconstrained FCNN training path, and an initial adapted MonoKAN policy module.
+The current implementation includes clean simulators, demand processes, heuristic baselines, paper-style lost-sales product generation, DirectBackprop training, residual order-up-to policy decoders, structural diagnostics, distribution-shift evaluation, plotting, and tests.
 
 ## Project Status
 
 Current status:
 
 - Core single-item lost-sales simulators are implemented and tested.
-- Paper-style no-lead-time lost-sales product generation, reward evaluation, base-stock baselines, and FCNN training are implemented.
-- FCNN evaluation is comparable against baselines using the same test products, seeds, horizon, and burn-in.
-- Failure-analysis CSV generation is available for policy comparison and bottom-product inspection.
+- Paper-style no-lead-time lost-sales product generation, reward evaluation, base-stock baselines, and DirectBackprop training are implemented.
+- The primary neural workflow uses a historical base-stock anchor plus a learned residual target-stock correction.
+- The primary four-model comparison is `PaperFCNNResidualOrderUpTo`, `KANResidualOrderUpTo`, `ConstrainedMLPResidualOrderUpTo`, and `MonoKANResidualOrderUpTo`.
+- Target-stock monotonicity diagnostics, MonoKAN spline certification, and distribution-shift evaluation are available.
+- Evaluation is comparable across policies using the same products, demand paths, seeds, horizon, and burn-in.
 
 Current limitations:
 
-- Paper lost-sales product generation follows Table 1 of Maggiar et al. for the synthetic LS setting, and the FCNN path uses the current paper-style observable feature pipeline.
+- Paper lost-sales product generation follows Table 1 of Maggiar et al. for the synthetic LS setting, and neural policies use the current observable feature pipeline.
 - `OmniscientOptimal` is the exact Gamma critical-quantile base-stock benchmark and uses hidden true demand parameters.
-- Differentiable training is validated for the FCNN path; the adapted MonoKAN module is implemented and unit-tested but has not yet been fully benchmarked.
+- Current residual MONOkan evidence is diagnostic, not a full paper replication or statistically established robustness result.
+- Raw-action FCNN and raw-action MonoKAN scripts remain as legacy diagnostics; they are not the primary workflow.
 - Multi-echelon, perishability, and procurement-removal settings are not implemented yet.
 - Generated outputs and model checkpoints are intentionally ignored by Git and are not required for tests.
+
+See also:
+
+- `docs/ARCHITECTURE.md` for module boundaries and the residual policy API.
+- `docs/TEAM_WORKFLOW.md` for branch, test, and pull-request expectations.
+- `docs/MONOKAN_METHOD_EVIDENCE.md` for current MONOkan evidence and limitations.
 
 ## Setup
 
@@ -121,6 +130,12 @@ python scripts/run_quick_smoke_test.py
 
 This command generates a tiny paper-style product set, evaluates historical/oracle base-stock baselines, trains a miniature FCNN for a few epochs, and evaluates it. It does not require any pre-existing files in `outputs/`.
 
+Run a tiny comparable residual benchmark:
+
+```bash
+python scripts/run_idp_benchmark.py --mode structure-ls --profile compact --config configs/paper_lost_sales_debug.yaml --models PaperFCNNResidualOrderUpTo,ConstrainedMLPResidualOrderUpTo,MonoKANResidualOrderUpTo --output-dir outputs/idp_benchmark/residual_smoke
+```
+
 ## Reproducible Commands
 
 From a clean checkout:
@@ -132,13 +147,10 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 python -m pytest
 python scripts/run_quick_smoke_test.py
-python scripts/run_paper_lost_sales_baselines.py
-python scripts/train_paper_lost_sales_fcnn.py
-python scripts/evaluate_paper_lost_sales_fcnn.py
-python scripts/train_paper_lost_sales_monokan.py
-python scripts/evaluate_paper_lost_sales_monokan.py
-python scripts/analyze_paper_lost_sales_fcnn_failures.py
+python scripts/run_idp_benchmark.py --mode structure-ls --profile compact --config configs/paper_lost_sales_debug.yaml --models PaperFCNNResidualOrderUpTo,ConstrainedMLPResidualOrderUpTo,MonoKANResidualOrderUpTo --output-dir outputs/idp_benchmark/residual_smoke
 ```
+
+Older raw-action training/evaluation scripts are retained for diagnostics and historical comparison. Prefer `scripts/run_idp_benchmark.py` for new residual order-up-to experiments.
 
 The evaluation scripts default to the validation split. The held-out test split should be used only for the final report:
 
@@ -339,7 +351,10 @@ This writes:
 outputs/plots/paper_lost_sales_policy_structure.png
 ```
 
-The main evaluation focus is FCNN/MonoKAN performance, policy structure, and monotonicity diagnostics. Dual sourcing, perishability, and procurement-removal are later paper-setting extensions.
+This raw-action analysis is retained for historical diagnostics. The main
+current evaluation focus is the residual order-up-to workflow below. Dual
+sourcing, perishability, and procurement-removal are later paper-setting
+extensions.
 
 Analyze FCNN vs base-stock baselines:
 
@@ -357,7 +372,18 @@ outputs/results/paper_lost_sales_fcnn_worst_cases_validation.csv
 ## IDP Monotonic Architecture Benchmark
 
 The IDP benchmark is LS-first and paper-aligned. It starts with the no-lead-time
-lost-sales setting from Maggiar et al. before considering any extensions.
+lost-sales setting from Maggiar et al. before considering any extensions. The
+current primary workflow is a residual order-up-to comparison with a historical
+base-stock anchor.
+
+Primary residual order-up-to policies:
+
+- `PaperFCNNResidualOrderUpTo`: residual target-stock MLP baseline.
+- `KANResidualOrderUpTo`: unconstrained KAN residual target-stock baseline.
+- `ConstrainedMLPResidualOrderUpTo`: monotonic MLP residual target-stock comparator.
+- `MonoKANResidualOrderUpTo`: MonoKAN residual target-stock policy.
+
+Legacy raw-action and diagnostic policies:
 
 - `PaperFCNN`: the causal-CNN plus MLP architecture from the paper.
 - `MonoKAN`: a Hermite-spline architecture with nonincreasing inventory response enforced by construction.
@@ -371,6 +397,12 @@ Run the deterministic compact benchmark:
 
 ```bash
 python scripts/run_idp_benchmark.py --mode structure-ls --profile compact
+```
+
+Run the current four-model residual comparison:
+
+```bash
+python scripts/run_idp_benchmark.py --mode structure-ls --profile compact --config configs/paper_lost_sales_debug.yaml --models PaperFCNNResidualOrderUpTo,KANResidualOrderUpTo,ConstrainedMLPResidualOrderUpTo,MonoKANResidualOrderUpTo
 ```
 
 Run the paper replication baseline:
@@ -394,6 +426,8 @@ operational_metrics.csv
 predictions.csv
 training_log.csv
 monokan_splines.csv
+target_structure_diagnostics.csv
+monokan_spline_certification.csv
 metadata.json
 models/
 plots/
@@ -401,8 +435,20 @@ plots/
 
 The primary report is `paper_table3_replication.csv`, which gives average
 reward and gap to the omniscient optimal benchmark. Structural artifacts include
-policy curves, order-up-to scatter plots, violation rates, slope diagnostics,
-MonoKAN spline samples, and constrained-MLP architecture comparisons.
+policy curves, order-up-to scatter plots, inventory-order violation rates,
+target-stock context monotonicity diagnostics, residual correction magnitudes,
+MonoKAN spline samples, MonoKAN spline certification, and constrained-MLP
+architecture comparisons.
+
+Distribution-shift diagnostics are available through:
+
+```bash
+python scripts/run_distribution_shift_validation.py --config configs/paper_lost_sales_fcnn_alignment_medium.yaml --source-benchmark-dir outputs/idp_benchmark/<trained_run>
+python scripts/run_distribution_shift_multiseed.py --config configs/paper_lost_sales_fcnn_alignment_medium.yaml --output-root outputs/monokan_distribution_shift_multiseed_10seed --progress
+```
+
+These commands are diagnostics, not final paper-replication claims. Generated
+results and checkpoints under `outputs/` should not be committed.
 Perishability, multi-echelon, and real-world data are intentionally out of scope
 until the LS replication is credible.
 

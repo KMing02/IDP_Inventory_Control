@@ -1,4 +1,8 @@
-"""Evaluate trained paper lost-sales FCNN."""
+"""Legacy raw-action FCNN checkpoint evaluator.
+
+Prefer `scripts/run_idp_benchmark.py` for residual order-up-to comparisons and
+shared output schemas.
+"""
 
 from __future__ import annotations
 

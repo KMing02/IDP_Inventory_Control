@@ -1,4 +1,8 @@
-"""Sweep FCNN sizes for the paper lost-sales replication."""
+"""Legacy raw-action FCNN size sweep.
+
+Prefer `scripts/run_idp_benchmark.py` with residual order-up-to policies for
+current architecture comparisons.
+"""
 
 from __future__ import annotations
 

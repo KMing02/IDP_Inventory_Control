@@ -1,4 +1,8 @@
-"""Train adapted MonoKAN for Maggiar-style lost-sales replication."""
+"""Legacy raw-action MonoKAN training diagnostic.
+
+Prefer `scripts/run_idp_benchmark.py` with `MonoKANResidualOrderUpTo` for new
+comparative experiments.
+"""
 
 from __future__ import annotations
 

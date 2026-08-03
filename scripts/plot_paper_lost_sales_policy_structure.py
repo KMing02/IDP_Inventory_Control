@@ -1,4 +1,8 @@
-"""Plot paper lost-sales FCNN policy structure and monotonicity diagnostics."""
+"""Legacy raw-action FCNN policy-structure plotter.
+
+Prefer benchmark-generated residual diagnostics and
+`scripts/plot_policy_contours_from_predictions.py` for current comparisons.
+"""
 
 from __future__ import annotations
 
