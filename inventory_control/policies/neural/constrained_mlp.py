@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
+
 try:
     import torch
     from torch import nn
@@ -19,6 +22,36 @@ def _positive_initial_weight(out_features: int, in_features: int) -> torch.Tenso
     scale = (2.0 / max(in_features + out_features, 1)) ** 0.5
     desired = torch.rand(out_features, in_features) * scale + 1e-3
     return _inverse_softplus(desired)
+
+
+def _allocate_activation_counts(
+    hidden_units: int,
+    activation_weights: Sequence[float],
+) -> tuple[int, int, int]:
+    """Allocate convex, concave, and bounded neurons by largest remainder.
+
+    Proportional quotas are rounded down first. Remaining neurons are assigned
+    by descending fractional remainder, with deterministic ties resolved in
+    convex, concave, bounded order.
+    """
+    if hidden_units < 1:
+        raise ValueError("hidden_units must be positive")
+    weights = tuple(float(weight) for weight in activation_weights)
+    if len(weights) != 3:
+        raise ValueError("activation_weights must contain convex, concave, and bounded weights")
+    if any(not math.isfinite(weight) or weight < 0.0 for weight in weights):
+        raise ValueError("activation_weights must be finite and nonnegative")
+    total_weight = sum(weights)
+    if total_weight <= 0.0:
+        raise ValueError("activation_weights must contain at least one positive weight")
+
+    quotas = [hidden_units * weight / total_weight for weight in weights]
+    counts = [math.floor(quota) for quota in quotas]
+    remaining = hidden_units - sum(counts)
+    priority = sorted(range(3), key=lambda index: (-(quotas[index] - counts[index]), index))
+    for index in priority[:remaining]:
+        counts[index] += 1
+    return int(counts[0]), int(counts[1]), int(counts[2])
 
 
 class FirstMonotoneLinear(nn.Module):
@@ -82,40 +115,96 @@ class NonnegativeLinear(nn.Module):
 
 
 class MonotoneActivation(nn.Module):
-    """Monotone activation with optional C-MNN-style activation mixing."""
+    """Simple monotone activation or faithful CMNN mixed activation."""
 
-    def __init__(self, activation: str = "ELU", mixed: bool = False) -> None:
+    def __init__(
+        self,
+        activation: str = "ELU",
+        mixed: bool = False,
+        input_dim: int | None = None,
+        activation_weights: Sequence[float] = (1.0, 1.0, 1.0),
+    ) -> None:
         super().__init__()
         self.activation = str(activation)
         self.mixed = bool(mixed)
+        normalized_activation = self.activation.lower()
+        supported = {"elu", "softplus", "tanh"}
+        if normalized_activation not in supported:
+            raise ValueError(f"unsupported monotone activation: {self.activation}")
+        if self.mixed and normalized_activation not in {"elu", "softplus"}:
+            raise ValueError(
+                "mixed_activation=True requires a convex monotone CMNN base activation: ELU or softplus"
+            )
+        if self.mixed and input_dim is None:
+            raise ValueError("input_dim is required when mixed_activation=True")
+        self.input_dim = int(input_dim) if input_dim is not None else None
+        self.activation_weights = tuple(float(weight) for weight in activation_weights)
+        self.activation_counts = (
+            _allocate_activation_counts(self.input_dim, self.activation_weights)
+            if self.mixed and self.input_dim is not None
+            else None
+        )
 
     def _base(self, values: torch.Tensor) -> torch.Tensor:
-        if self.activation.upper() == "ELU":
+        if self.activation.lower() == "elu":
             return torch.nn.functional.elu(values)
         if self.activation.lower() == "softplus":
             return torch.nn.functional.softplus(values)
         if self.activation.lower() == "tanh":
             return torch.tanh(values)
-        raise ValueError(f"unsupported monotone activation: {self.activation}")
+        raise ValueError(f"unsupported monotone activation: {self.activation}")  # pragma: no cover
+
+    def convex(self, values: torch.Tensor) -> torch.Tensor:
+        """Apply the convex CMNN activation rho."""
+        return self._base(values)
+
+    def concave(self, values: torch.Tensor) -> torch.Tensor:
+        """Apply the concave CMNN activation -rho(-x)."""
+        return -self._base(-values)
+
+    def bounded(self, values: torch.Tensor) -> torch.Tensor:
+        """Apply the paper's bounded/saturated CMNN activation."""
+        one = torch.ones((), dtype=values.dtype, device=values.device)
+        rho_one = self._base(one)
+        negative_branch = self._base(values + one) - rho_one
+        nonnegative_branch = self.concave(values - one) + rho_one
+        return torch.where(values < 0.0, negative_branch, nonnegative_branch)
 
     def output_dim(self, input_dim: int) -> int:
         """Return the feature dimension after applying this activation."""
-        return int(input_dim) * 3 if self.mixed else int(input_dim)
+        if self.mixed and int(input_dim) != self.input_dim:
+            raise ValueError(f"mixed activation was allocated for {self.input_dim} features, got {input_dim}")
+        return int(input_dim)
 
     def forward(self, values: torch.Tensor) -> torch.Tensor:
-        """Apply a monotone activation or a monotone convex/concave/linear mix."""
+        """Apply a simple activation or the allocated CMNN activation mix."""
         if not self.mixed:
             return self._base(values)
-        return torch.cat([self._base(values), -self._base(-values), values], dim=-1)
+        if values.shape[-1] != self.input_dim:
+            raise ValueError(
+                f"mixed activation was allocated for {self.input_dim} features, got {values.shape[-1]}"
+            )
+        if self.activation_counts is None:  # pragma: no cover
+            raise RuntimeError("mixed activation counts were not initialized")
+        functions = (self.convex, self.concave, self.bounded)
+        activated_groups = []
+        start = 0
+        for count, function in zip(self.activation_counts, functions):
+            stop = start + count
+            activated_groups.append(function(values[..., start:stop]))
+            start = stop
+        return torch.cat(activated_groups, dim=-1)
 
 
 class ConstrainedMonotoneMLP(nn.Module):
-    """Partially monotone MLP with nonincreasing inventory response.
+    """Faithful partially monotone CMNN with nonincreasing inventory response.
 
     The first layer constrains only the inventory feature. Later layers use
     nonnegative weights and monotone activations, so the full network remains
     nonincreasing in inventory while allowing unconstrained effects from demand
-    history and product economics through their first-layer weights.
+    history and product economics through their first-layer weights. In exact
+    CMNN mode, each hidden layer allocates its fixed width across convex,
+    concave, and bounded activation groups.
     """
 
     def __init__(
@@ -125,6 +214,7 @@ class ConstrainedMonotoneMLP(nn.Module):
         hidden_units: int = 32,
         activation: str = "ELU",
         mixed_activation: bool = True,
+        activation_weights: Sequence[float] = (1.0, 1.0, 1.0),
         monotonic_feature: int = 0,
         monotonic_direction: int = -1,
     ) -> None:
@@ -137,6 +227,12 @@ class ConstrainedMonotoneMLP(nn.Module):
         self.monotonic_feature = int(monotonic_feature)
         self.monotonic_direction = int(monotonic_direction)
         self.mixed_activation = bool(mixed_activation)
+        self.activation_weights = tuple(float(weight) for weight in activation_weights)
+        self.activation_counts = (
+            _allocate_activation_counts(self.hidden_units, self.activation_weights)
+            if self.mixed_activation
+            else None
+        )
 
         layers: list[nn.Module] = [
             FirstMonotoneLinear(
@@ -146,12 +242,22 @@ class ConstrainedMonotoneMLP(nn.Module):
                 monotonic_direction=monotonic_direction,
             )
         ]
-        activation_layer = MonotoneActivation(activation, mixed=mixed_activation)
+        activation_layer = MonotoneActivation(
+            activation,
+            mixed=mixed_activation,
+            input_dim=hidden_units,
+            activation_weights=self.activation_weights,
+        )
         layers.append(activation_layer)
         previous_dim = activation_layer.output_dim(hidden_units)
         for _ in range(hidden_layers - 1):
             layers.append(NonnegativeLinear(previous_dim, hidden_units))
-            activation_layer = MonotoneActivation(activation, mixed=mixed_activation)
+            activation_layer = MonotoneActivation(
+                activation,
+                mixed=mixed_activation,
+                input_dim=hidden_units,
+                activation_weights=self.activation_weights,
+            )
             layers.append(activation_layer)
             previous_dim = activation_layer.output_dim(hidden_units)
         layers.append(NonnegativeLinear(previous_dim, 1))
@@ -191,7 +297,7 @@ def _constrained_mlp_source(config: dict, metadata: dict | None, key: str) -> di
 
 
 def make_constrained_monotone_mlp_model(config: dict, metadata: dict | None = None) -> ConstrainedMonotoneMLP:
-    """Build the C-MNN-style constrained monotone MLP for paper features."""
+    """Build the faithful CMNN for paper lost-sales features."""
     source = _constrained_mlp_source(config, metadata, "constrained_monotone_mlp")
     history_length = int(source.get("history_length_H", config["history_length_H"]))
     return ConstrainedMonotoneMLP(
@@ -200,6 +306,7 @@ def make_constrained_monotone_mlp_model(config: dict, metadata: dict | None = No
         hidden_units=int(source.get("hidden_units", 32)),
         activation=str(source.get("activation", "ELU")),
         mixed_activation=bool(source.get("mixed_activation", True)),
+        activation_weights=source.get("activation_weights", (1.0, 1.0, 1.0)),
         monotonic_feature=int(source.get("monotonic_feature", 0)),
         monotonic_direction=int(source.get("monotonic_direction", -1)),
     )

@@ -361,7 +361,7 @@ lost-sales setting from Maggiar et al. before considering any extensions.
 
 - `PaperFCNN`: the causal-CNN plus MLP architecture from the paper.
 - `MonoKAN`: a Hermite-spline architecture with nonincreasing inventory response enforced by construction.
-- `ConstrainedMonoMLP`: a C-MNN-style constrained monotone MLP with mixed monotone activations.
+- `ConstrainedMonoMLP`: a faithful CMNN with allocated convex, concave, and bounded monotone activations.
 - `PositiveWeightMLP`: a simpler positive-weight monotone MLP used as an expressiveness control.
 - `PenaltyMLP`: an optional penalty-based reference, not the primary method.
 - `NonOmniscientOptimal`: Gamma method-of-moments base-stock benchmark using historical demand.

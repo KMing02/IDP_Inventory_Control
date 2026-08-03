@@ -46,6 +46,7 @@ constrained_monotone_mlp:
   hidden_units: 32
   activation: ELU
   mixed_activation: true
+  activation_weights: [1.0, 1.0, 1.0]
   monotonic_feature: 0
   monotonic_direction: -1
 

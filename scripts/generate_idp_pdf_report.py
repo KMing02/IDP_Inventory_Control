@@ -215,7 +215,7 @@ def main() -> None:
             f"Structure criterion: architecture-enforced candidates are {', '.join(architecture_names)}; compliant candidates have zero raw and deployed monotonicity violations.",
             f"Performance criterion: the best compliant architecture is {best_architecture_name} with reward {_fmt(best_architecture['mean_reward_per_period'])} per period versus PaperFCNN {_fmt(fcnn['mean_reward_per_period'])}, a {best_architecture_gap:.1f}% gap.",
             f"Efficiency criterion: compact training time is {_fmt(mono['training_seconds'])} seconds for MonoKAN versus {_fmt(fcnn['training_seconds'])} seconds for PaperFCNN, about {_fmt(speedup, 1)}x faster in this smoke setting.",
-            "Interpretability criterion: MonoKAN exposes spline components; ConstrainedMonoMLP tests the C-MNN-style activation mix; PositiveWeightMLP is an expressiveness control.",
+            "Interpretability criterion: MonoKAN exposes spline components; ConstrainedMonoMLP uses the CMNN convex/concave/bounded activation allocation; PositiveWeightMLP is an expressiveness control.",
         ]
         y = _bullets(fig, 0.09, y, status, width=92, size=10)
         y -= 0.01
