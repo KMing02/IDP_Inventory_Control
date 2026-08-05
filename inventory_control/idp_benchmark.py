@@ -304,6 +304,17 @@ def _train_model(
         monotonicity_penalty_weight=float(penalty_weight),
         monotonicity_samples_per_product=int(settings["monotonicity_samples_per_product"]),
         clip_imitation_predictions=clip_imitation_predictions,
+        imitation_early_stopping=bool(settings.get("imitation_early_stopping", False)),
+        imitation_max_epochs=(
+            int(settings["imitation_max_epochs"])
+            if settings.get("imitation_max_epochs") is not None
+            else None
+        ),
+        imitation_patience=int(settings.get("imitation_patience", 10)),
+        imitation_min_delta=float(settings.get("imitation_min_delta", 0.0)),
+        track_imitation_validation=bool(settings.get("track_imitation_validation", False)),
+        reset_optimizer_after_imitation=bool(settings.get("reset_optimizer_after_imitation", False)),
+        adam_kwargs=dict(config.get("adam", {})),
     )
     if result.best_state_dict is not None:
         model.load_state_dict(result.best_state_dict)
@@ -396,6 +407,15 @@ def _prediction_table(
 
 
 def _prediction_summary(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Summarize full-grid action accuracy and zero-inventory calibration.
+
+    Zero-inventory order-up-to metrics use only ``state_index == 0`` and
+    therefore contain one observation per product. They compare the policy's
+    implied order-up-to level at zero inventory with the corresponding oracle
+    level; they are calibration diagnostics, not full-grid policy-shape
+    metrics. Full-grid shape is summarized separately by the active/inactive
+    slope diagnostics.
+    """
     rows = []
     for policy_name, policy_rows in predictions.groupby("policy_name", sort=False):
         raw_errors = policy_rows["raw_error"].to_numpy(dtype=float)
@@ -408,6 +428,14 @@ def _prediction_summary(predictions: pd.DataFrame) -> pd.DataFrame:
         deployed_order_up_to_errors = (
             zero_inventory_rows["deployed_order_up_to_level"].to_numpy(dtype=float)
             - zero_inventory_rows["deployed_omniscient_order_up_to_level"].to_numpy(dtype=float)
+        )
+        raw_zero_inventory_diagnostics = _zero_inventory_order_up_to_diagnostics(
+            raw_order_up_to_errors,
+            prefix="raw",
+        )
+        deployed_zero_inventory_diagnostics = _zero_inventory_order_up_to_diagnostics(
+            deployed_order_up_to_errors,
+            prefix="deployed",
         )
         raw_violations: list[float] = []
         deployed_violations: list[float] = []
@@ -427,12 +455,28 @@ def _prediction_summary(predictions: pd.DataFrame) -> pd.DataFrame:
                 "deployed_rmse": float(np.sqrt(np.mean(deployed_errors**2))),
                 "mae": float(np.mean(np.abs(deployed_errors))),
                 "rmse": float(np.sqrt(np.mean(deployed_errors**2))),
-                "raw_order_up_to_mae": float(np.mean(np.abs(raw_order_up_to_errors))),
-                "raw_order_up_to_rmse": float(np.sqrt(np.mean(raw_order_up_to_errors**2))),
-                "deployed_order_up_to_mae": float(np.mean(np.abs(deployed_order_up_to_errors))),
-                "deployed_order_up_to_rmse": float(np.sqrt(np.mean(deployed_order_up_to_errors**2))),
-                "order_up_to_mae": float(np.mean(np.abs(deployed_order_up_to_errors))),
-                "order_up_to_rmse": float(np.sqrt(np.mean(deployed_order_up_to_errors**2))),
+                **raw_zero_inventory_diagnostics,
+                **deployed_zero_inventory_diagnostics,
+                # Backward-compatible aliases for the explicitly named
+                # zero-inventory calibration metrics above.
+                "raw_order_up_to_mae": raw_zero_inventory_diagnostics[
+                    "raw_zero_inventory_order_up_to_mae"
+                ],
+                "raw_order_up_to_rmse": raw_zero_inventory_diagnostics[
+                    "raw_zero_inventory_order_up_to_rmse"
+                ],
+                "deployed_order_up_to_mae": deployed_zero_inventory_diagnostics[
+                    "deployed_zero_inventory_order_up_to_mae"
+                ],
+                "deployed_order_up_to_rmse": deployed_zero_inventory_diagnostics[
+                    "deployed_zero_inventory_order_up_to_rmse"
+                ],
+                "order_up_to_mae": deployed_zero_inventory_diagnostics[
+                    "deployed_zero_inventory_order_up_to_mae"
+                ],
+                "order_up_to_rmse": deployed_zero_inventory_diagnostics[
+                    "deployed_zero_inventory_order_up_to_rmse"
+                ],
                 "raw_violation_rate": float(np.mean(raw_increases > 1e-6)),
                 "deployed_violation_rate": float(np.mean(deployed_increases > 1e-6)),
                 "raw_max_violation": float(raw_increases.max(initial=0.0)),
@@ -443,6 +487,36 @@ def _prediction_summary(predictions: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _zero_inventory_order_up_to_diagnostics(
+    errors: np.ndarray,
+    prefix: str,
+) -> dict[str, float]:
+    """Return robust one-observation-per-product calibration diagnostics."""
+    absolute_errors = np.abs(np.asarray(errors, dtype=float))
+    if absolute_errors.size == 0:
+        raise ValueError("Zero-inventory order-up-to diagnostics require at least one product")
+
+    total_absolute_error = float(np.sum(absolute_errors))
+    descending_errors = np.sort(absolute_errors)[::-1]
+    if total_absolute_error > 0.0:
+        largest_contribution = float(descending_errors[0] / total_absolute_error)
+        top3_contribution = float(np.sum(descending_errors[:3]) / total_absolute_error)
+    else:
+        largest_contribution = 0.0
+        top3_contribution = 0.0
+
+    metric_prefix = f"{prefix}_zero_inventory_order_up_to"
+    return {
+        f"{metric_prefix}_mae": float(np.mean(absolute_errors)),
+        f"{metric_prefix}_rmse": float(np.sqrt(np.mean(np.square(absolute_errors)))),
+        f"{metric_prefix}_median_absolute_error": float(np.median(absolute_errors)),
+        f"{metric_prefix}_p90_absolute_error": float(np.quantile(absolute_errors, 0.9)),
+        f"{metric_prefix}_max_absolute_error": float(np.max(absolute_errors)),
+        f"{metric_prefix}_largest_product_contribution": largest_contribution,
+        f"{metric_prefix}_top3_product_contribution": top3_contribution,
+    }
 
 
 def _mean_slope_deviation(policy_rows: pd.DataFrame) -> float:
@@ -864,14 +938,33 @@ def run_idp_benchmark(
     model_dir = destination / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
     torch.save(paper_fcnn.state_dict(), model_dir / "paper_fcnn.pt")
+    if paper_fcnn_result.best_imitation_state_dict is not None:
+        torch.save(paper_fcnn_result.best_imitation_state_dict, model_dir / "paper_fcnn_best_imitation.pt")
     if selected_penalty is not None:
         torch.save(selected_penalty["model"].state_dict(), model_dir / "penalty_mlp.pt")
+        if selected_penalty["result"].best_imitation_state_dict is not None:
+            torch.save(
+                selected_penalty["result"].best_imitation_state_dict,
+                model_dir / "penalty_mlp_best_imitation.pt",
+            )
     if positive_weight_mlp is not None:
         torch.save(positive_weight_mlp.state_dict(), model_dir / "positive_weight_mlp.pt")
+        if positive_weight_result is not None and positive_weight_result.best_imitation_state_dict is not None:
+            torch.save(
+                positive_weight_result.best_imitation_state_dict,
+                model_dir / "positive_weight_mlp_best_imitation.pt",
+            )
     if constrained_mlp is not None:
         torch.save(constrained_mlp.state_dict(), model_dir / "constrained_monotone_mlp.pt")
+        if constrained_mlp_result is not None and constrained_mlp_result.best_imitation_state_dict is not None:
+            torch.save(
+                constrained_mlp_result.best_imitation_state_dict,
+                model_dir / "constrained_monotone_mlp_best_imitation.pt",
+            )
     if monokan is not None:
         torch.save(monokan.state_dict(), model_dir / "monokan.pt")
+        if monokan_result is not None and monokan_result.best_imitation_state_dict is not None:
+            torch.save(monokan_result.best_imitation_state_dict, model_dir / "monokan_best_imitation.pt")
     summary.to_csv(destination / "summary.csv", index=False)
     table3 = _paper_table3(summary)
     table3.to_csv(destination / "paper_table3_replication.csv", index=False)

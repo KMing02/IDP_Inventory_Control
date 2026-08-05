@@ -58,6 +58,11 @@ idp_benchmark:
   max_order_factor: 4.0
   scale_action_by_history_mean: true
   normalize_reward_loss: true
+  imitation_early_stopping: false
+  imitation_max_epochs: null
+  imitation_patience: 10
+  imitation_min_delta: 0.0
+  reset_optimizer_after_imitation: false
   monotonicity_samples_per_product: 2
   penalty_weights: [0.1, 1.0, 10.0]
   raw_violation_threshold: 0.01

@@ -9,10 +9,12 @@ from inventory_control.policies.neural.fcnn import (
     compute_paper_fcnn_feature_stats,
 )
 from inventory_control.training.direct_backprop import (
+    historical_base_stock_imitation_loss,
     make_paper_lost_sales_training_batch,
     paper_inventory_monotonicity_penalty,
     paper_lost_sales_fcnn_order,
     paper_lost_sales_fcnn_rollout,
+    paper_order_diagnostics,
     paper_reward_normalization_scale,
     train_paper_lost_sales_fcnn,
 )
@@ -169,6 +171,76 @@ def test_fcnn_feature_stats_are_computed_from_training_products_only() -> None:
     assert stats.price_scale == pytest.approx(sum(product.price for product in products) / len(products))
 
 
+class _ConstantRawOrder(torch.nn.Module):
+    def __init__(self, order: float) -> None:
+        super().__init__()
+        self.order = torch.nn.Parameter(torch.tensor(order))
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.order.expand(features.shape[0])
+
+
+def _imitation_semantics_batch() -> dict[str, torch.Tensor]:
+    return {
+        "initial_inventory": torch.tensor([0.0]),
+        "historical_mean_demand": torch.tensor([10.0]),
+        "historical_base_stock_level": torch.tensor([15.0]),
+        "feature_demand_scale": torch.tensor([10.0]),
+        "feature_price_scale": torch.tensor([1.0]),
+        "price": torch.tensor([1.0]),
+        "purchase_cost": torch.tensor([0.0]),
+        "holding_cost": torch.tensor([0.0]),
+        "lost_sale_penalty": torch.tensor([0.0]),
+        "history": torch.zeros((1, 32)),
+    }
+
+
+def test_imitation_diagnostics_match_raw_and_deployed_target_semantics() -> None:
+    diagnostics = paper_order_diagnostics(
+        _ConstantRawOrder(12.0),
+        _imitation_semantics_batch(),
+        max_order_factor=1.0,
+        scale_action_by_history_mean=False,
+        inventory_fractions=(0.0,),
+    )
+
+    # raw: |12 - 15| = 3; deployed: |min(12, 10) - min(15, 10)| = 0.
+    # These assertions fail for either raw-vs-capped or deployed-vs-uncapped pairing.
+    assert diagnostics["raw_imitation_mae"] == pytest.approx(3.0)
+    assert diagnostics["raw_imitation_rmse"] == pytest.approx(3.0)
+    assert diagnostics["deployed_imitation_mae"] == pytest.approx(0.0)
+    assert diagnostics["deployed_imitation_rmse"] == pytest.approx(0.0)
+
+
+def test_imitation_loss_uses_target_matching_prediction_semantics() -> None:
+    model = _ConstantRawOrder(12.0)
+    batch = _imitation_semantics_batch()
+    seed = 17
+    deployed_loss = historical_base_stock_imitation_loss(
+        model,
+        batch,
+        torch.Generator().manual_seed(seed),
+        samples_per_product=4,
+        max_order_factor=1.0,
+        clip_predictions=True,
+    )
+    raw_loss = historical_base_stock_imitation_loss(
+        model,
+        batch,
+        torch.Generator().manual_seed(seed),
+        samples_per_product=4,
+        max_order_factor=1.0,
+        clip_predictions=False,
+    )
+    fractions = torch.rand(4, generator=torch.Generator().manual_seed(seed))
+    inventory = fractions * 10.0
+    raw_target = 15.0 - inventory
+    expected_raw_loss = torch.mean((torch.tensor(12.0) - raw_target) ** 2)
+
+    assert deployed_loss.item() == pytest.approx(0.0)
+    assert raw_loss.item() == pytest.approx(expected_raw_loss.item())
+
+
 def test_train_paper_lost_sales_fcnn_tracks_best_validation_checkpoint() -> None:
     products = PaperLostSalesProductGenerator(_paper_config()).generate(4, "train")
     model = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
@@ -234,6 +306,145 @@ def test_training_tracks_best_imitation_checkpoint() -> None:
     assert result.best_imitation_loss is not None
     assert result.best_imitation_epoch in {1, 2, 3}
     assert result.best_imitation_state_dict is not None
+
+
+def test_imitation_early_stopping_uses_deterministic_validation_rmse() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(4, "train")
+    validation_products = PaperLostSalesProductGenerator(_paper_config()).generate(2, "validation")
+    model = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
+
+    result = train_paper_lost_sales_fcnn(
+        products,
+        model,
+        horizon=3,
+        batch_size=2,
+        epochs=1,
+        learning_rate=0.0,
+        seed=0,
+        imitation_epochs=1,
+        validation_products=validation_products,
+        imitation_early_stopping=True,
+        imitation_max_epochs=10,
+        imitation_patience=2,
+        imitation_min_delta=0.0,
+    )
+
+    assert result.imitation_epochs_completed == 3
+    assert result.imitation_early_stopped is True
+    assert result.best_imitation_epoch == 1
+    assert result.best_imitation_validation_mae is not None
+    assert result.best_imitation_validation_rmse is not None
+    assert result.imitation_selection_metric == "deployed_imitation_rmse"
+    assert result.best_imitation_state_dict is not None
+    assert result.imitation_end_state_dict is not None
+    assert result.training_log is not None
+    assert [row["phase"] for row in result.training_log] == [0, 0, 0, 1]
+    assert result.training_log[2]["imitation_early_stop_triggered"] == 1
+    assert result.training_log[0]["imitation_checkpoint_metric"] == "deployed_imitation_rmse"
+    assert {
+        "imitation_validation_raw_mae",
+        "imitation_validation_raw_rmse",
+        "imitation_validation_deployed_mae",
+        "imitation_validation_deployed_rmse",
+    }.issubset(result.training_log[0])
+
+
+def test_raw_imitation_early_stopping_selects_raw_rmse() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(4, "train")
+    validation_products = PaperLostSalesProductGenerator(_paper_config()).generate(2, "validation")
+    model = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
+
+    result = train_paper_lost_sales_fcnn(
+        products,
+        model,
+        horizon=3,
+        batch_size=2,
+        epochs=0,
+        learning_rate=0.0,
+        seed=0,
+        imitation_epochs=1,
+        validation_products=validation_products,
+        imitation_early_stopping=True,
+        imitation_max_epochs=2,
+        imitation_patience=1,
+        clip_imitation_predictions=False,
+    )
+
+    assert result.imitation_selection_metric == "raw_imitation_rmse"
+    assert result.training_log is not None
+    first = result.training_log[0]
+    assert first["imitation_checkpoint_metric"] == "raw_imitation_rmse"
+    assert first["imitation_validation_rmse"] == first["imitation_validation_raw_rmse"]
+
+
+def test_optimizer_can_reset_between_imitation_and_reward(monkeypatch) -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(4, "train")
+    model = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
+    adam_calls = []
+    original_adam = torch.optim.Adam
+
+    def counting_adam(*args, **kwargs):
+        adam_calls.append(kwargs.copy())
+        return original_adam(*args, **kwargs)
+
+    monkeypatch.setattr(torch.optim, "Adam", counting_adam)
+    result = train_paper_lost_sales_fcnn(
+        products,
+        model,
+        horizon=3,
+        batch_size=2,
+        epochs=1,
+        learning_rate=1e-3,
+        seed=0,
+        imitation_epochs=1,
+        reset_optimizer_after_imitation=True,
+        adam_kwargs={"betas": (0.8, 0.9)},
+    )
+
+    assert len(adam_calls) == 2
+    assert adam_calls == [
+        {"lr": 1e-3, "betas": (0.8, 0.9)},
+        {"lr": 1e-3, "betas": (0.8, 0.9)},
+    ]
+    assert result.optimizer_reset_after_imitation is True
+    assert result.training_log is not None
+    assert result.training_log[-1]["optimizer_reset_after_imitation"] == 1
+
+
+def test_disabled_training_controls_preserve_fixed_epoch_behavior() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(4, "train")
+    first = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
+    second = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
+    second.load_state_dict(first.state_dict())
+
+    baseline = train_paper_lost_sales_fcnn(
+        products,
+        first,
+        horizon=3,
+        batch_size=2,
+        epochs=2,
+        learning_rate=1e-3,
+        seed=7,
+        imitation_epochs=2,
+    )
+    explicit_defaults = train_paper_lost_sales_fcnn(
+        products,
+        second,
+        horizon=3,
+        batch_size=2,
+        epochs=2,
+        learning_rate=1e-3,
+        seed=7,
+        imitation_epochs=2,
+        imitation_early_stopping=False,
+        imitation_max_epochs=100,
+        reset_optimizer_after_imitation=False,
+    )
+
+    assert baseline.training_losses == explicit_defaults.training_losses
+    assert baseline.imitation_epochs_completed == explicit_defaults.imitation_epochs_completed == 2
+    for first_parameter, second_parameter in zip(first.parameters(), second.parameters()):
+        assert torch.equal(first_parameter, second_parameter)
 
 
 def test_inventory_monotonicity_penalty_has_gradient_for_increasing_policy() -> None:

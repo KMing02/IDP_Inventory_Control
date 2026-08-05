@@ -57,11 +57,116 @@ def test_prediction_summary_reports_accuracy_and_monotonicity() -> None:
     assert summary["raw_violation_rate"] == 0.5
     assert summary["raw_max_violation"] == 1.0
     assert summary["deployed_max_violation"] == 0.5
+    assert summary["raw_zero_inventory_order_up_to_mae"] == 1.0
+    assert summary["raw_zero_inventory_order_up_to_rmse"] == 1.0
+    assert summary["deployed_zero_inventory_order_up_to_mae"] == 0.0
+    assert summary["deployed_zero_inventory_order_up_to_rmse"] == 0.0
     assert summary["raw_order_up_to_mae"] == 1.0
+    assert summary["raw_order_up_to_mae"] == summary["raw_zero_inventory_order_up_to_mae"]
+    assert summary["raw_order_up_to_rmse"] == summary["raw_zero_inventory_order_up_to_rmse"]
     assert summary["deployed_order_up_to_mae"] == 0.0
+    assert (
+        summary["deployed_order_up_to_mae"]
+        == summary["deployed_zero_inventory_order_up_to_mae"]
+    )
+    assert (
+        summary["deployed_order_up_to_rmse"]
+        == summary["deployed_zero_inventory_order_up_to_rmse"]
+    )
     assert summary["order_up_to_mae"] == summary["deployed_order_up_to_mae"]
+    assert summary["order_up_to_rmse"] == summary["deployed_order_up_to_rmse"]
+    assert summary["raw_zero_inventory_order_up_to_median_absolute_error"] == 1.0
+    assert summary["raw_zero_inventory_order_up_to_p90_absolute_error"] == 1.0
+    assert summary["raw_zero_inventory_order_up_to_max_absolute_error"] == 1.0
+    assert summary["raw_zero_inventory_order_up_to_largest_product_contribution"] == 1.0
+    assert summary["raw_zero_inventory_order_up_to_top3_product_contribution"] == 1.0
+    assert summary["deployed_zero_inventory_order_up_to_median_absolute_error"] == 0.0
+    assert summary["deployed_zero_inventory_order_up_to_p90_absolute_error"] == 0.0
+    assert summary["deployed_zero_inventory_order_up_to_max_absolute_error"] == 0.0
+    assert summary["deployed_zero_inventory_order_up_to_largest_product_contribution"] == 0.0
+    assert summary["deployed_zero_inventory_order_up_to_top3_product_contribution"] == 0.0
     assert summary["active_slope_deviation_from_minus_one"] == pytest.approx(1.5)
     assert summary["inactive_slope_deviation_from_zero"] == pytest.approx(1.5)
+
+
+def test_zero_inventory_order_up_to_diagnostics_are_robust_and_ignore_other_states() -> None:
+    import pandas as pd
+
+    raw_zero_errors = np.asarray([1.0, -2.0, 3.0, -10.0])
+    deployed_zero_errors = np.asarray([1.0, -2.0, 3.0, -4.0])
+    rows = []
+    for product_index, (raw_error, deployed_error) in enumerate(
+        zip(raw_zero_errors, deployed_zero_errors)
+    ):
+        for state_index in (0, 1):
+            raw_level_error = raw_error if state_index == 0 else 10_000.0
+            deployed_level_error = deployed_error if state_index == 0 else -10_000.0
+            rows.append(
+                {
+                    "product_id": f"p{product_index}",
+                    "policy_name": "model",
+                    "state_index": state_index,
+                    "inventory": float(state_index),
+                    "raw_order": 5.0 - state_index,
+                    "deployed_order": 5.0 - state_index,
+                    "raw_oracle_order": 5.0 - state_index,
+                    "deployed_oracle_order": 5.0 - state_index,
+                    "raw_error": 0.0,
+                    "deployed_error": 0.0,
+                    "raw_order_up_to_level": 20.0 + raw_level_error,
+                    "deployed_order_up_to_level": 20.0 + deployed_level_error,
+                    "raw_omniscient_order_up_to_level": 20.0,
+                    "deployed_omniscient_order_up_to_level": 20.0,
+                }
+            )
+
+    summary = _prediction_summary(pd.DataFrame(rows)).iloc[0]
+    raw_absolute_errors = np.abs(raw_zero_errors)
+    deployed_absolute_errors = np.abs(deployed_zero_errors)
+
+    assert summary["raw_zero_inventory_order_up_to_mae"] == pytest.approx(
+        raw_absolute_errors.mean()
+    )
+    assert summary["raw_zero_inventory_order_up_to_rmse"] == pytest.approx(
+        np.sqrt(np.mean(raw_absolute_errors**2))
+    )
+    assert summary["raw_zero_inventory_order_up_to_median_absolute_error"] == pytest.approx(
+        np.median(raw_absolute_errors)
+    )
+    assert summary["raw_zero_inventory_order_up_to_p90_absolute_error"] == pytest.approx(
+        np.quantile(raw_absolute_errors, 0.9)
+    )
+    assert summary["raw_zero_inventory_order_up_to_max_absolute_error"] == 10.0
+    assert summary["raw_zero_inventory_order_up_to_largest_product_contribution"] == pytest.approx(
+        10.0 / 16.0
+    )
+    assert summary["raw_zero_inventory_order_up_to_top3_product_contribution"] == pytest.approx(
+        15.0 / 16.0
+    )
+    assert summary["deployed_zero_inventory_order_up_to_mae"] == pytest.approx(
+        deployed_absolute_errors.mean()
+    )
+    assert summary["deployed_zero_inventory_order_up_to_rmse"] == pytest.approx(
+        np.sqrt(np.mean(deployed_absolute_errors**2))
+    )
+    assert summary["deployed_zero_inventory_order_up_to_median_absolute_error"] == pytest.approx(
+        np.median(deployed_absolute_errors)
+    )
+    assert summary["deployed_zero_inventory_order_up_to_p90_absolute_error"] == pytest.approx(
+        np.quantile(deployed_absolute_errors, 0.9)
+    )
+    assert summary["deployed_zero_inventory_order_up_to_max_absolute_error"] == 4.0
+    assert summary[
+        "deployed_zero_inventory_order_up_to_largest_product_contribution"
+    ] == pytest.approx(4.0 / 10.0)
+    assert summary["deployed_zero_inventory_order_up_to_top3_product_contribution"] == pytest.approx(
+        9.0 / 10.0
+    )
+    assert summary["raw_order_up_to_mae"] == summary["raw_zero_inventory_order_up_to_mae"]
+    assert (
+        summary["deployed_order_up_to_mae"]
+        == summary["deployed_zero_inventory_order_up_to_mae"]
+    )
 
 
 def _fixed_product() -> PaperLostSalesProduct:
@@ -200,8 +305,14 @@ def test_compact_idp_benchmark_smoke(tmp_path: Path) -> None:
     assert {
         "raw_mae",
         "deployed_mae",
+        "raw_zero_inventory_order_up_to_mae",
+        "deployed_zero_inventory_order_up_to_mae",
+        "deployed_zero_inventory_order_up_to_p90_absolute_error",
+        "deployed_zero_inventory_order_up_to_top3_product_contribution",
         "order_up_to_mae",
         "raw_violation_rate",
+        "active_slope_deviation_from_minus_one",
+        "inactive_slope_deviation_from_zero",
         "parameter_count",
         "training_seconds",
     }.issubset(artifacts.summary.columns)

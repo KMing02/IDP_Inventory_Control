@@ -426,7 +426,8 @@ too small for final scientific claims.
   shared action cap; raw spline monotonicity is supported, but the deployed order scale is not calibrated.
 - Deployed monotonicity alone is insufficient because action clipping can remove raw violations.
 - The original report's order-up-to and active-slope diagnostics contained implementation errors; these
-  were corrected during this audit.
+  were corrected during this audit. Order-up-to error is specifically a one-point-per-product,
+  zero-inventory calibration diagnostic, while active/inactive slopes diagnose full-grid policy shape.
 
 ## Compact robustness across seeds
 
@@ -443,7 +444,7 @@ too small for final scientific claims.
 ## Required before full paper_replication
 
 1. Freeze a capacity-comparison rule: paper-faithful architectures or parameter-matched architectures.
-2. Use corrected order-up-to and active/inactive slope diagnostics.
+2. Use explicit zero-inventory order-up-to calibration and active/inactive full-grid slope diagnostics.
 3. Report raw and deployed monotonicity separately.
 4. Repeat timing with warm-up and multiple seeds on one fixed device.
 5. Run full validation only after the compact protocol is stable.

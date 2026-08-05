@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import copy
 import time
+from typing import Any
 
 try:
     import torch
@@ -50,7 +51,14 @@ class DirectBackpropResult:
     best_imitation_loss: float | None = None
     best_imitation_epoch: int | None = None
     best_imitation_state_dict: dict[str, torch.Tensor] | None = None
-    training_log: list[dict[str, float | int]] | None = None
+    best_imitation_validation_mae: float | None = None
+    best_imitation_validation_rmse: float | None = None
+    imitation_selection_metric: str | None = None
+    imitation_end_state_dict: dict[str, torch.Tensor] | None = None
+    imitation_epochs_completed: int = 0
+    imitation_early_stopped: bool = False
+    optimizer_reset_after_imitation: bool = False
+    training_log: list[dict[str, float | int | str]] | None = None
     monotonicity_penalties: list[float] | None = None
     elapsed_seconds: float = 0.0
 
@@ -269,7 +277,12 @@ def historical_base_stock_imitation_loss(
     scale_action_by_history_mean: bool = False,
     clip_predictions: bool = True,
 ) -> torch.Tensor:
-    """Supervised warm-start loss matching historical base-stock actions."""
+    """Supervised warm-start loss with semantically matched action targets.
+
+    ``clip_predictions=True`` compares deployed orders with deployment-capped
+    base-stock targets. ``clip_predictions=False`` compares uncapped raw orders
+    with uncapped base-stock targets.
+    """
     batch_size = batch["initial_inventory"].shape[0]
     max_inventory_level = float(max_order_factor) * torch.clamp(batch["historical_mean_demand"], min=1.0)
     repeated_losses = []
@@ -291,8 +304,11 @@ def historical_base_stock_imitation_loss(
                 inventory,
                 scale_action_by_history_mean=scale_action_by_history_mean,
             )
-        target = torch.relu(batch["historical_base_stock_level"] - inventory)
-        target = torch.minimum(target, torch.relu(max_inventory_level - inventory))
+        raw_target = torch.relu(batch["historical_base_stock_level"] - inventory)
+        if clip_predictions:
+            target = torch.minimum(raw_target, torch.relu(max_inventory_level - inventory))
+        else:
+            target = raw_target
         repeated_losses.append(torch.mean((predicted - target) ** 2))
     return torch.stack(repeated_losses).mean()
 
@@ -305,12 +321,17 @@ def paper_order_diagnostics(
     scale_action_by_history_mean: bool,
     inventory_fractions: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75),
 ) -> dict[str, float]:
-    """Measure raw-order calibration on fixed fractions of the observable cap."""
+    """Measure consistent raw and deployed imitation calibration.
+
+    Raw orders are compared with uncapped base-stock targets. Deployed orders
+    are compared with targets clipped by the same state-dependent action cap.
+    """
     max_inventory = float(max_order_factor) * torch.clamp(batch["historical_mean_demand"], min=1.0)
     raw_orders = []
     deployed_orders = []
     caps = []
-    targets = []
+    raw_targets = []
+    deployed_targets = []
     for fraction in inventory_fractions:
         inventory = float(fraction) * max_inventory
         raw = paper_lost_sales_raw_order(
@@ -320,24 +341,30 @@ def paper_order_diagnostics(
             scale_action_by_history_mean=scale_action_by_history_mean,
         )
         cap = torch.relu(max_inventory - inventory)
-        target = torch.minimum(torch.relu(batch["historical_base_stock_level"] - inventory), cap)
+        raw_target = torch.relu(batch["historical_base_stock_level"] - inventory)
+        deployed_target = torch.minimum(raw_target, cap)
         raw_orders.append(raw)
         deployed_orders.append(torch.minimum(raw, cap))
         caps.append(cap)
-        targets.append(target)
+        raw_targets.append(raw_target)
+        deployed_targets.append(deployed_target)
     raw = torch.cat(raw_orders)
     deployed = torch.cat(deployed_orders)
     cap = torch.cat(caps)
-    target = torch.cat(targets)
-    errors = raw - target
+    raw_target = torch.cat(raw_targets)
+    deployed_target = torch.cat(deployed_targets)
+    raw_errors = raw - raw_target
+    deployed_errors = deployed - deployed_target
     return {
         "raw_order_mean": float(raw.mean().item()),
         "raw_order_min": float(raw.min().item()),
         "raw_order_max": float(raw.max().item()),
         "deployed_order_mean": float(deployed.mean().item()),
         "cap_hit_rate": float(torch.mean((raw >= cap - 1e-6).float()).item()),
-        "raw_imitation_mae": float(torch.mean(torch.abs(errors)).item()),
-        "raw_imitation_rmse": float(torch.sqrt(torch.mean(errors**2)).item()),
+        "raw_imitation_mae": float(torch.mean(torch.abs(raw_errors)).item()),
+        "raw_imitation_rmse": float(torch.sqrt(torch.mean(raw_errors**2)).item()),
+        "deployed_imitation_mae": float(torch.mean(torch.abs(deployed_errors)).item()),
+        "deployed_imitation_rmse": float(torch.sqrt(torch.mean(deployed_errors**2)).item()),
     }
 
 
@@ -361,36 +388,99 @@ def train_paper_lost_sales_fcnn(
     monotonicity_samples_per_product: int = 1,
     include_terminal_salvage: bool = True,
     clip_imitation_predictions: bool = True,
+    imitation_early_stopping: bool = False,
+    imitation_max_epochs: int | None = None,
+    imitation_patience: int = 10,
+    imitation_min_delta: float = 0.0,
+    track_imitation_validation: bool = False,
+    reset_optimizer_after_imitation: bool = False,
+    adam_kwargs: dict[str, Any] | None = None,
     device: torch.device | str | None = None,
 ) -> DirectBackpropResult:
-    """Train FCNN with DirectBackprop-style negative reward minimization."""
+    """Train a neural policy with imitation followed by DirectBackprop.
+
+    Fixed imitation remains the default. When ``imitation_early_stopping`` is
+    enabled, ``imitation_max_epochs`` is the upper bound and a deterministic
+    validation-grid RMSE controls patience. The validation-best imitation
+    checkpoint is restored before reward training. Adam can optionally be
+    recreated at that boundary without resetting model weights.
+    """
+    if imitation_epochs < 0 or epochs < 0:
+        raise ValueError("imitation_epochs and epochs must be nonnegative")
+    if imitation_early_stopping:
+        if not validation_products:
+            raise ValueError("imitation early stopping requires validation_products")
+        if imitation_max_epochs is None:
+            imitation_limit = int(imitation_epochs)
+        else:
+            imitation_limit = int(imitation_max_epochs)
+        if imitation_limit < 1:
+            raise ValueError("imitation_max_epochs must be positive when early stopping is enabled")
+        if imitation_patience < 1:
+            raise ValueError("imitation_patience must be positive")
+        if imitation_min_delta < 0.0:
+            raise ValueError("imitation_min_delta must be nonnegative")
+    else:
+        imitation_limit = int(imitation_epochs)
+
     torch.manual_seed(seed)
     generator = torch.Generator().manual_seed(seed)
     penalty_generator = torch.Generator().manual_seed(seed + 1_000_003)
     chosen_device = torch.device(device) if device is not None else default_torch_device()
     model = model.to(chosen_device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer_parameters = dict(adam_kwargs or {})
+
+    def make_optimizer() -> torch.optim.Adam:
+        return torch.optim.Adam(model.parameters(), lr=learning_rate, **optimizer_parameters)
+
+    optimizer = make_optimizer()
     training_losses: list[float] = []
     mean_total_rewards: list[float] = []
     validation_rewards: list[float] = []
     validation_epochs: list[int] = []
-    training_log: list[dict[str, float | int]] = []
+    training_log: list[dict[str, float | int | str]] = []
     monotonicity_penalties: list[float] = []
     best_validation_reward: float | None = None
     best_state_dict: dict[str, torch.Tensor] | None = None
     best_imitation_loss: float | None = None
     best_imitation_epoch: int | None = None
     best_imitation_state_dict: dict[str, torch.Tensor] | None = None
-    total_epochs = imitation_epochs + epochs
+    best_imitation_validation_mae: float | None = None
+    best_imitation_validation_rmse: float | None = None
+    imitation_end_state_dict: dict[str, torch.Tensor] | None = None
+    imitation_epochs_completed = 0
+    imitation_early_stopped = False
+    optimizer_reset_performed = False
+    imitation_selection_metric = (
+        "deployed_imitation_rmse" if clip_imitation_predictions else "raw_imitation_rmse"
+    )
+    patience_reference: float | None = None
+    epochs_without_improvement = 0
+    imitation_validation_batch: dict[str, torch.Tensor] | None = None
+    if (imitation_early_stopping or track_imitation_validation) and validation_products:
+        validation_generator = torch.Generator().manual_seed(seed + 2_000_003)
+        imitation_validation_batch = move_batch_to_device(
+            make_paper_lost_sales_training_batch(
+                validation_products,
+                horizon,
+                validation_generator,
+                feature_stats=feature_stats,
+            ),
+            infer_model_device(model),
+        )
     start_time = time.perf_counter()
-    for epoch in range(total_epochs):
+
+    def train_epoch(
+        epoch_number: int, imitation_phase: bool
+    ) -> tuple[dict[str, float | int | str], float]:
+        nonlocal optimizer
         indices = torch.randint(0, len(products), (batch_size,), generator=generator).tolist()
         batch_products = [products[index] for index in indices]
         batch = move_batch_to_device(
             make_paper_lost_sales_training_batch(batch_products, horizon, generator, feature_stats=feature_stats),
             infer_model_device(model),
         )
-        if epoch < imitation_epochs:
+        if imitation_phase:
             mean_total_reward = paper_lost_sales_fcnn_rollout(
                 model,
                 batch,
@@ -434,12 +524,6 @@ def train_paper_lost_sales_fcnn(
         optimizer.step()
         if hasattr(model, "apply_monotonic_constraints"):
             model.apply_monotonic_constraints()
-        if epoch < imitation_epochs:
-            current_imitation_loss = float(primary_loss.detach().item())
-            if best_imitation_loss is None or current_imitation_loss < best_imitation_loss:
-                best_imitation_loss = current_imitation_loss
-                best_imitation_epoch = epoch + 1
-                best_imitation_state_dict = copy.deepcopy(model.state_dict())
         order_diagnostics = paper_order_diagnostics(
             model,
             batch,
@@ -449,9 +533,9 @@ def train_paper_lost_sales_fcnn(
         training_losses.append(float(loss.detach().item()))
         mean_total_rewards.append(float(mean_total_reward.detach().item()))
         monotonicity_penalties.append(float(monotonicity_penalty.detach().item()))
-        log_row: dict[str, float | int] = {
-            "epoch": epoch + 1,
-            "phase": 0 if epoch < imitation_epochs else 1,
+        log_row: dict[str, float | int | str] = {
+            "epoch": epoch_number,
+            "phase": 0 if imitation_phase else 1,
             "training_loss": float(loss.detach().item()),
             "primary_loss": float(primary_loss.detach().item()),
             "training_mean_total_reward": float(mean_total_reward.detach().item()),
@@ -460,14 +544,21 @@ def train_paper_lost_sales_fcnn(
             "elapsed_seconds": float(time.perf_counter() - start_time),
             **order_diagnostics,
         }
+
+        return log_row, float(primary_loss.detach().item())
+
+    def validate_reward(
+        epoch_number: int, log_row: dict[str, float | int | str], is_final: bool
+    ) -> None:
+        nonlocal best_validation_reward, best_state_dict
         should_validate = bool(
             validation_products
             and validation_interval
-            and ((epoch + 1) % validation_interval == 0 or epoch + 1 == total_epochs)
+            and (epoch_number % validation_interval == 0 or is_final)
         )
         if should_validate:
             if validation_callback is not None:
-                validation_reward = validation_callback(epoch + 1, model)
+                validation_reward = validation_callback(epoch_number, model)
             else:
                 validation_batch = make_paper_lost_sales_training_batch(
                     validation_products,
@@ -486,12 +577,100 @@ def train_paper_lost_sales_fcnn(
                     ).mean()
                 validation_reward = float(validation_reward_tensor.item())
             validation_rewards.append(float(validation_reward))
-            validation_epochs.append(epoch + 1)
+            validation_epochs.append(epoch_number)
             log_row["validation_mean_total_reward"] = float(validation_reward)
             if best_validation_reward is None or validation_reward > best_validation_reward:
                 best_validation_reward = float(validation_reward)
                 best_state_dict = copy.deepcopy(model.state_dict())
+
+    global_epoch = 0
+    for imitation_index in range(imitation_limit):
+        global_epoch += 1
+        log_row, current_imitation_loss = train_epoch(global_epoch, imitation_phase=True)
+        imitation_epochs_completed += 1
+        validation_mae: float | None = None
+        validation_rmse: float | None = None
+        if imitation_validation_batch is not None:
+            validation_diagnostics = paper_order_diagnostics(
+                model,
+                imitation_validation_batch,
+                max_order_factor=max_order_factor,
+                scale_action_by_history_mean=scale_action_by_history_mean,
+                inventory_fractions=(0.0, 0.25, 0.5, 0.75, 1.0),
+            )
+            selection_prefix = "deployed" if clip_imitation_predictions else "raw"
+            validation_mae = float(validation_diagnostics[f"{selection_prefix}_imitation_mae"])
+            validation_rmse = float(validation_diagnostics[f"{selection_prefix}_imitation_rmse"])
+            log_row["imitation_validation_raw_mae"] = float(
+                validation_diagnostics["raw_imitation_mae"]
+            )
+            log_row["imitation_validation_raw_rmse"] = float(
+                validation_diagnostics["raw_imitation_rmse"]
+            )
+            log_row["imitation_validation_deployed_mae"] = float(
+                validation_diagnostics["deployed_imitation_mae"]
+            )
+            log_row["imitation_validation_deployed_rmse"] = float(
+                validation_diagnostics["deployed_imitation_rmse"]
+            )
+            log_row["imitation_checkpoint_metric"] = imitation_selection_metric
+            log_row["imitation_validation_mae"] = validation_mae
+            log_row["imitation_validation_rmse"] = validation_rmse
+            zero_inventory = torch.zeros_like(imitation_validation_batch["initial_inventory"])
+            zero_raw_order = paper_lost_sales_raw_order(
+                model,
+                imitation_validation_batch,
+                zero_inventory,
+                scale_action_by_history_mean=scale_action_by_history_mean,
+            )
+            log_row["imitation_validation_zero_inventory_raw_order_mean"] = float(
+                zero_raw_order.mean().item()
+            )
+        if imitation_early_stopping:
+            if validation_mae is None or validation_rmse is None:  # pragma: no cover
+                raise RuntimeError("imitation validation diagnostics were not computed")
+            if best_imitation_validation_rmse is None or validation_rmse < best_imitation_validation_rmse:
+                best_imitation_validation_mae = validation_mae
+                best_imitation_validation_rmse = validation_rmse
+                best_imitation_loss = validation_rmse
+                best_imitation_epoch = global_epoch
+                best_imitation_state_dict = copy.deepcopy(model.state_dict())
+            if patience_reference is None or validation_rmse < patience_reference - float(imitation_min_delta):
+                patience_reference = validation_rmse
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            imitation_early_stopped = epochs_without_improvement >= int(imitation_patience)
+            log_row["imitation_epochs_without_improvement"] = epochs_without_improvement
+            log_row["imitation_early_stop_triggered"] = int(imitation_early_stopped)
+        else:
+            if best_imitation_loss is None or current_imitation_loss < best_imitation_loss:
+                best_imitation_loss = current_imitation_loss
+                best_imitation_epoch = global_epoch
+                best_imitation_state_dict = copy.deepcopy(model.state_dict())
+
+        is_final = epochs == 0 and (imitation_early_stopped or imitation_index + 1 == imitation_limit)
+        validate_reward(global_epoch, log_row, is_final=is_final)
         training_log.append(log_row)
+
+        if imitation_early_stopped:
+            break
+
+    if imitation_early_stopping and best_imitation_state_dict is not None:
+        model.load_state_dict(best_imitation_state_dict)
+    if imitation_epochs_completed > 0:
+        imitation_end_state_dict = copy.deepcopy(model.state_dict())
+    if reset_optimizer_after_imitation and imitation_epochs_completed > 0 and epochs > 0:
+        optimizer = make_optimizer()
+        optimizer_reset_performed = True
+
+    for reward_index in range(int(epochs)):
+        global_epoch += 1
+        log_row, _ = train_epoch(global_epoch, imitation_phase=False)
+        log_row["optimizer_reset_after_imitation"] = int(optimizer_reset_performed)
+        validate_reward(global_epoch, log_row, is_final=reward_index + 1 == int(epochs))
+        training_log.append(log_row)
+
     elapsed_seconds = float(time.perf_counter() - start_time)
     return DirectBackpropResult(
         model=model,
@@ -504,6 +683,13 @@ def train_paper_lost_sales_fcnn(
         best_imitation_loss=best_imitation_loss,
         best_imitation_epoch=best_imitation_epoch,
         best_imitation_state_dict=best_imitation_state_dict,
+        best_imitation_validation_mae=best_imitation_validation_mae,
+        best_imitation_validation_rmse=best_imitation_validation_rmse,
+        imitation_selection_metric=(imitation_selection_metric if imitation_early_stopping else None),
+        imitation_end_state_dict=imitation_end_state_dict,
+        imitation_epochs_completed=imitation_epochs_completed,
+        imitation_early_stopped=imitation_early_stopped,
+        optimizer_reset_after_imitation=optimizer_reset_performed,
         training_log=training_log,
         monotonicity_penalties=monotonicity_penalties,
         elapsed_seconds=elapsed_seconds,

@@ -254,8 +254,8 @@ def main() -> None:
                 ["Reward gap vs FCNN", "100 * (R_model / R_FCNN - 1)", "Performance constraint"],
                 ["Raw violation rate", "mean[ max(q(y_hi)-q(y_lo), 0) > tol ]", "Monotonicity before deployment caps"],
                 ["Deployed violation rate", "same check after action cap", "Operational monotonicity"],
-                ["Slope deviation", "mean |Delta q / Delta y + 1| in active region", "Order-up-to shape"],
-                ["Order-up-to error", "|(q(0)) - S_oracle| or grid analogue", "Structural diagnostic only"],
+                ["Slope deviation", "mean |Delta q / Delta y + 1| in active region", "Full-grid policy-shape diagnostic"],
+                ["Zero-inventory order-up-to error", "|q(0) - S_oracle|; one value per product", "Calibration diagnostic, not full-grid shape"],
             ],
             columns=["Metric", "Definition", "Interpretation"],
         )
@@ -264,7 +264,7 @@ def main() -> None:
             fig,
             0.07,
             0.19,
-            "Graphically, a good policy curve decreases linearly with slope -1 until it reaches zero order. A monotone curve with the wrong slope can still pass violation tests while failing the order-up-to structural test.",
+            "Graphically, a good policy curve decreases linearly with slope -1 until it reaches zero order. A monotone curve with the wrong slope can still pass violation tests while failing the active/inactive slope diagnostics.",
             width=96,
             size=10,
         )
@@ -348,7 +348,7 @@ def main() -> None:
             fig,
             0.07,
             0.28,
-            "Interpretation: the oracle base-stock level S comes from the exact Gamma critical quantile. Order-up-to error is not used as a supervised training objective; it is an ex-post structural diagnostic showing whether the learned policy recovered the economic form of the solution.",
+            "Interpretation: the oracle base-stock level S comes from the exact Gamma critical quantile. The reported order-up-to error uses only y=0, with one value per product, so it measures zero-inventory calibration rather than full-grid shape. Active/inactive slope diagnostics evaluate policy shape across the grid.",
             width=96,
             size=10,
         )

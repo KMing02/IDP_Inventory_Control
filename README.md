@@ -403,6 +403,18 @@ The primary report is `paper_table3_replication.csv`, which gives average
 reward and gap to the omniscient optimal benchmark. Structural artifacts include
 policy curves, order-up-to scatter plots, violation rates, slope diagnostics,
 MonoKAN spline samples, and constrained-MLP architecture comparisons.
+The explicitly named `raw_zero_inventory_order_up_to_*` and
+`deployed_zero_inventory_order_up_to_*` metrics use only `state_index == 0`:
+there is one observation per product, comparing the policy-implied
+zero-inventory order-up-to level with the raw or deployed oracle level. They
+measure zero-inventory calibration, not full-grid policy shape. The legacy
+`raw_order_up_to_*`, `deployed_order_up_to_*`, and `order_up_to_*` fields are
+numerically identical aliases retained for compatibility. Median, P90,
+maximum, largest-product contribution, and top-3 contribution fields make
+outlier concentration visible; contribution fields are shares of total
+absolute error. Full-grid shape remains represented by
+`active_slope_deviation_from_minus_one` and
+`inactive_slope_deviation_from_zero`.
 Perishability, multi-echelon, and real-world data are intentionally out of scope
 until the LS replication is credible.
 
