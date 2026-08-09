@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.pytest_tmp*/
 .mypy_cache/
 .ruff_cache/
 .coverage
@@ -24,6 +25,7 @@ outputs/**/*.ckpt
 *.pth
 *.ckpt
 .ipynb_checkpoints/
+tmp/
 .DS_Store
 IDP_Inventory_Control/
 third_party/
