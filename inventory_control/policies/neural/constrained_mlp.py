@@ -286,6 +286,83 @@ class ConstrainedMonotoneMLP(nn.Module):
         return [layer.effective_weight() for layer in self.network if isinstance(layer, NonnegativeLinear)]
 
 
+class ConstrainedMLPResidualOrderUpTo(nn.Module):
+    """CMNN-backbone Residual Order-Up-To model.
+
+    Inventory monotonicity is supplied by the external decoder
+    ``q = relu(S_theta - inventory)``.  The context-only first layer is
+    unconstrained in this initial ablation, so this model makes no
+    context-monotonicity guarantee.  It reuses the faithful width-preserving
+    CMNN mixed activations and nonnegative downstream layers.
+    """
+
+    paper_action_parameterization = "residual_order_up_to"
+    paper_residual_center = 1.0
+    paper_residual_scale = 0.5
+    paper_residual_anchor = "gamma"
+    paper_track_residual_gradient_diagnostics = True
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_layers: int = 2,
+        hidden_units: int = 32,
+        activation: str = "ELU",
+        activation_weights: Sequence[float] = (1.0, 1.0, 1.0),
+    ) -> None:
+        super().__init__()
+        if hidden_layers < 1:
+            raise ValueError("ConstrainedMLPResidualOrderUpTo requires at least one hidden layer")
+        self.input_dim = int(input_dim)
+        self.hidden_layers = int(hidden_layers)
+        self.hidden_units = int(hidden_units)
+        self.activation_weights = tuple(float(weight) for weight in activation_weights)
+        self.activation_counts = _allocate_activation_counts(self.hidden_units, self.activation_weights)
+
+        first = nn.Linear(self.input_dim, self.hidden_units)
+        nn.init.xavier_uniform_(first.weight)
+        nn.init.zeros_(first.bias)
+        layers: list[nn.Module] = [first]
+        activation_layer = MonotoneActivation(
+            activation,
+            mixed=True,
+            input_dim=self.hidden_units,
+            activation_weights=self.activation_weights,
+        )
+        layers.append(activation_layer)
+        for _ in range(self.hidden_layers - 1):
+            layers.append(NonnegativeLinear(self.hidden_units, self.hidden_units))
+            layers.append(
+                MonotoneActivation(
+                    activation,
+                    mixed=True,
+                    input_dim=self.hidden_units,
+                    activation_weights=self.activation_weights,
+                )
+            )
+        self.backbone = nn.ModuleList(layers)
+        self.residual_readout = nn.Linear(self.hidden_units, 1)
+        nn.init.zeros_(self.residual_readout.weight)
+        nn.init.zeros_(self.residual_readout.bias)
+
+    def preactivation(self, context: torch.Tensor) -> torch.Tensor:
+        values = context
+        for layer in self.backbone:
+            values = layer(values)
+        return self.residual_readout(values).squeeze(-1)
+
+    def forward(self, context: torch.Tensor) -> torch.Tensor:
+        """Return ``u_theta = 2 sigmoid(z_theta)``."""
+        return 2.0 * torch.sigmoid(self.preactivation(context))
+
+    def apply_monotonic_constraints(self) -> None:
+        """Compatibility hook; downstream constraints use parameterization."""
+        return None
+
+    def effective_downstream_weights(self) -> list[torch.Tensor]:
+        return [layer.effective_weight() for layer in self.backbone if isinstance(layer, NonnegativeLinear)]
+
+
 def _constrained_mlp_source(config: dict, metadata: dict | None, key: str) -> dict:
     if metadata is not None:
         return metadata
@@ -309,6 +386,22 @@ def make_constrained_monotone_mlp_model(config: dict, metadata: dict | None = No
         activation_weights=source.get("activation_weights", (1.0, 1.0, 1.0)),
         monotonic_feature=int(source.get("monotonic_feature", 0)),
         monotonic_direction=int(source.get("monotonic_direction", -1)),
+    )
+
+
+def make_paper_residual_order_up_to_constrained_mlp_model(
+    config: dict,
+    metadata: dict | None = None,
+) -> ConstrainedMLPResidualOrderUpTo:
+    """Build the CMNN-backbone Residual Order-Up-To model."""
+    source = _constrained_mlp_source(config, metadata, "constrained_monotone_mlp")
+    history_length = int(source.get("history_length_H", config["history_length_H"]))
+    return ConstrainedMLPResidualOrderUpTo(
+        input_dim=history_length + 4,
+        hidden_layers=int(source.get("hidden_layers", 2)),
+        hidden_units=int(source.get("hidden_units", 32)),
+        activation=str(source.get("activation", "ELU")),
+        activation_weights=source.get("activation_weights", (1.0, 1.0, 1.0)),
     )
 
 

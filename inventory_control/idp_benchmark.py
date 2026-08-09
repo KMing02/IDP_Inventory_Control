@@ -47,7 +47,11 @@ from inventory_control.policies.neural.monokan import (
     sample_monokan_first_layer_splines,
 )
 from inventory_control.products import PaperLostSalesProduct, PaperLostSalesProductGenerator
-from inventory_control.training.direct_backprop import DirectBackpropResult, train_paper_lost_sales_fcnn
+from inventory_control.training.direct_backprop import (
+    DirectBackpropResult,
+    paper_lost_sales_raw_order,
+    train_paper_lost_sales_fcnn,
+)
 
 
 POLICY_ORDER = [
@@ -200,6 +204,41 @@ def _model_orders(
     max_order_factor: float,
     scale_action_by_history_mean: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
+    if getattr(model, "paper_action_parameterization", "raw") == "residual_order_up_to":
+        device = infer_model_device(model)
+        historical_mean = max(float(np.mean(product.historical_demand)), 1.0)
+        count = len(inventories)
+        batch = {
+            "history": torch.tensor(
+                [[float(value) / feature_stats.demand_scale for value in product.historical_demand]] * count,
+                dtype=torch.float32,
+                device=device,
+            ),
+            "feature_price_scale": torch.full((count,), feature_stats.price_scale, dtype=torch.float32, device=device),
+            "historical_mean_demand": torch.full((count,), historical_mean, dtype=torch.float32, device=device),
+            "historical_base_stock_level": torch.full(
+                (count,),
+                float(non_omniscient_gamma_base_stock_policy(product).S),
+                dtype=torch.float32,
+                device=device,
+            ),
+            "price": torch.full((count,), float(product.price), dtype=torch.float32, device=device),
+            "purchase_cost": torch.full((count,), float(product.purchase_cost), dtype=torch.float32, device=device),
+            "holding_cost": torch.full((count,), float(product.holding_cost), dtype=torch.float32, device=device),
+            "lost_sale_penalty": torch.full((count,), float(product.lost_sale_penalty), dtype=torch.float32, device=device),
+        }
+        inventory_tensor = torch.tensor(inventories, dtype=torch.float32, device=device)
+        model.eval()
+        with torch.no_grad():
+            raw = (
+                paper_lost_sales_raw_order(model, batch, inventory_tensor)
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(float)
+            )
+        cap = _deployment_order_cap(product, inventories, max_order_factor)
+        return raw, np.minimum(raw, cap)
     features = [
         build_paper_lost_sales_features(
             inventory=float(inventory),

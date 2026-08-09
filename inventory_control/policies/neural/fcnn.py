@@ -128,6 +128,87 @@ class PaperCausalCNNPolicy(nn.Module):
         return torch.nn.functional.softplus(self.mlp(mlp_input)).squeeze(-1)
 
 
+class PaperFCNNResidualOrderUpTo(nn.Module):
+    """Context-only FCNN backbone for residual order-up-to control.
+
+    The model returns only the bounded residual factor ``u_theta`` in ``(0, 2)``.
+    Historical anchoring and action decoding are shared outside the architecture.
+    Current inventory is intentionally absent from the network input.
+    """
+
+    paper_action_parameterization = "residual_order_up_to"
+    paper_residual_center = 1.0
+    paper_residual_scale = 0.5
+    paper_residual_anchor = "gamma"
+
+    def __init__(
+        self,
+        history_length: int,
+        hidden_layers: int = 2,
+        hidden_units: int = 32,
+        cnn_channels: int = 8,
+        cnn_dilations: Sequence[int] = (1, 2, 4, 8, 16),
+        activation: str = "ELU",
+    ) -> None:
+        super().__init__()
+        self.history_length = int(history_length)
+        blocks: list[nn.Module] = []
+        in_channels = 1
+        for dilation in cnn_dilations:
+            blocks.append(CausalConvBlock(in_channels, cnn_channels, int(dilation), activation=activation))
+            in_channels = cnn_channels
+        self.history_encoder = nn.Sequential(*blocks)
+
+        activation_cls = getattr(nn, activation)
+        layers: list[nn.Module] = []
+        previous_dim = cnn_channels + 4
+        for _ in range(hidden_layers):
+            layers.append(nn.Linear(previous_dim, hidden_units))
+            layers.append(activation_cls())
+            previous_dim = hidden_units
+        layers.append(nn.Linear(previous_dim, 1))
+        self.mlp = nn.Sequential(*layers)
+        self._calibrate_zero_context()
+
+    def preactivation(self, context: torch.Tensor) -> torch.Tensor:
+        history = context[:, : self.history_length].unsqueeze(1)
+        economics = context[:, self.history_length :]
+        encoded_history = self.history_encoder(history)[:, :, -1]
+        return self.mlp(torch.cat([encoded_history, economics], dim=1)).squeeze(-1)
+
+    def forward(self, context: torch.Tensor) -> torch.Tensor:
+        """Return ``u_theta = 2 sigmoid(z_theta)``."""
+        return 2.0 * torch.sigmoid(self.preactivation(context))
+
+    @torch.no_grad()
+    def _calibrate_zero_context(self) -> None:
+        reference = torch.zeros(1, self.history_length + 4)
+        offset = self.preactivation(reference).squeeze()
+        final = self.mlp[-1]
+        if not isinstance(final, nn.Linear):  # pragma: no cover
+            raise TypeError("residual FCNN final layer must be linear")
+        final.bias.sub_(offset)
+
+
+def make_paper_residual_order_up_to_fcnn_model(
+    config: dict,
+    metadata: dict | None = None,
+) -> PaperFCNNResidualOrderUpTo:
+    """Build the context-only PaperFCNN residual order-up-to model."""
+    source = metadata or config["fcnn"]
+    history_length = int(source.get("history_length_H", config["history_length_H"]))
+    if str(source.get("history_encoder", config["fcnn"].get("history_encoder", "causal_cnn"))) != "causal_cnn":
+        raise ValueError("PaperFCNNResidualOrderUpTo requires the causal_cnn history encoder")
+    return PaperFCNNResidualOrderUpTo(
+        history_length=history_length,
+        hidden_layers=int(source.get("hidden_layers", config["fcnn"]["hidden_layers"])),
+        hidden_units=int(source.get("hidden_units", config["fcnn"]["hidden_units"])),
+        cnn_channels=int(source.get("cnn_channels", config["fcnn"].get("cnn_channels", 8))),
+        cnn_dilations=tuple(source.get("cnn_dilations", config["fcnn"].get("cnn_dilations", [1, 2, 4, 8, 16]))),
+        activation=str(source.get("activation", config["fcnn"]["activation"])),
+    )
+
+
 def make_paper_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Module:
     """Build the configured paper policy model."""
     source = metadata or config["fcnn"]

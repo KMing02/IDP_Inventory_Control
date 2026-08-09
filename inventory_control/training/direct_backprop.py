@@ -37,6 +37,26 @@ def move_batch_to_device(batch: dict[str, torch.Tensor], device: torch.device) -
     return {key: value.to(device) for key, value in batch.items()}
 
 
+def _parameter_gradient_norm(parameters: list[nn.Parameter]) -> float:
+    squared = sum(
+        float(torch.sum(parameter.grad.detach() ** 2).item())
+        for parameter in parameters
+        if parameter.grad is not None
+    )
+    return squared**0.5
+
+
+def _parameter_update_norm(
+    parameters: list[nn.Parameter],
+    before: list[torch.Tensor],
+) -> float:
+    squared = sum(
+        float(torch.sum((parameter.detach() - original) ** 2).item())
+        for parameter, original in zip(parameters, before)
+    )
+    return squared**0.5
+
+
 @dataclass
 class DirectBackpropResult:
     """Training result for DirectBackprop FCNN."""
@@ -132,6 +152,8 @@ def paper_lost_sales_raw_order(
     scale_action_by_history_mean: bool = False,
 ) -> torch.Tensor:
     """Return uncapped policy orders for a batch and inventory vector."""
+    if getattr(model, "paper_action_parameterization", "raw") == "residual_order_up_to":
+        return torch.relu(paper_lost_sales_target_level(model, batch) - inventory)
     demand_scale = torch.clamp(batch["feature_demand_scale"], min=1.0)
     price_scale = torch.clamp(batch["feature_price_scale"], min=1.0)
     economics = torch.stack(
@@ -188,6 +210,37 @@ def paper_lost_sales_features(
     return torch.cat([(inventory / demand_scale).unsqueeze(-1), batch["history"], economics], dim=1)
 
 
+def paper_lost_sales_context_features(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    """Build normalized history/economic context without current inventory."""
+    price_scale = torch.clamp(batch["feature_price_scale"], min=1.0)
+    economics = torch.stack(
+        [
+            batch["price"] / price_scale,
+            batch["purchase_cost"] / price_scale,
+            batch["holding_cost"] / price_scale,
+            batch["lost_sale_penalty"] / price_scale,
+        ],
+        dim=1,
+    )
+    return torch.cat([batch["history"], economics], dim=1)
+
+
+def paper_lost_sales_target_level(
+    model: nn.Module,
+    batch: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    """Decode the residual policy's context-only target-stock level."""
+    if getattr(model, "paper_action_parameterization", "raw") != "residual_order_up_to":
+        raise ValueError("model does not use residual_order_up_to parameterization")
+    if getattr(model, "paper_residual_anchor", "gamma") != "gamma":
+        raise ValueError("the initial residual ablation requires the historical Gamma anchor")
+    historical_mean = torch.clamp(batch["historical_mean_demand"], min=1.0)
+    residual_output = model(paper_lost_sales_context_features(batch))
+    center = float(getattr(model, "paper_residual_center", 1.0))
+    scale = float(getattr(model, "paper_residual_scale", 0.5))
+    return batch["historical_base_stock_level"] + scale * (residual_output - center) * historical_mean
+
+
 def paper_inventory_monotonicity_penalty(
     model: nn.Module,
     batch: dict[str, torch.Tensor],
@@ -207,12 +260,18 @@ def paper_inventory_monotonicity_penalty(
         second = torch.rand(batch_size, generator=generator).to(batch["initial_inventory"].device)
         inventory_low = torch.minimum(first, second) * max_inventory
         inventory_high = torch.maximum(first, second) * max_inventory
-        low_order = model(paper_lost_sales_features(batch, inventory_low))
-        high_order = model(paper_lost_sales_features(batch, inventory_high))
-        if scale_action_by_history_mean:
-            action_scale = torch.clamp(batch["historical_mean_demand"], min=1.0)
-            low_order = low_order * action_scale
-            high_order = high_order * action_scale
+        low_order = paper_lost_sales_raw_order(
+            model,
+            batch,
+            inventory_low,
+            scale_action_by_history_mean=scale_action_by_history_mean,
+        )
+        high_order = paper_lost_sales_raw_order(
+            model,
+            batch,
+            inventory_high,
+            scale_action_by_history_mean=scale_action_by_history_mean,
+        )
         penalties.append(torch.mean(torch.relu(high_order - low_order) ** 2))
     return torch.stack(penalties).mean()
 
@@ -519,9 +578,39 @@ def train_paper_lost_sales_fcnn(
         else:
             monotonicity_penalty = torch.zeros((), dtype=primary_loss.dtype, device=primary_loss.device)
         loss = primary_loss + float(monotonicity_penalty_weight) * monotonicity_penalty
+        track_residual_gradients = bool(
+            getattr(model, "paper_track_residual_gradient_diagnostics", False)
+        )
+        residual_diagnostics: dict[str, float] = {}
+        if track_residual_gradients:
+            backbone_parameters = list(model.backbone.parameters())
+            readout_parameters = list(model.residual_readout.parameters())
+            backbone_before = [parameter.detach().clone() for parameter in backbone_parameters]
+            readout_before = [parameter.detach().clone() for parameter in readout_parameters]
         optimizer.zero_grad()
         loss.backward()
+        if track_residual_gradients:
+            residual_diagnostics.update(
+                {
+                    "residual_backbone_gradient_norm": _parameter_gradient_norm(backbone_parameters),
+                    "residual_readout_gradient_norm": _parameter_gradient_norm(readout_parameters),
+                }
+            )
         optimizer.step()
+        if track_residual_gradients:
+            residual_diagnostics.update(
+                {
+                    "residual_backbone_update_norm": _parameter_update_norm(
+                        backbone_parameters, backbone_before
+                    ),
+                    "residual_readout_update_norm": _parameter_update_norm(
+                        readout_parameters, readout_before
+                    ),
+                    "residual_readout_weight_norm": float(
+                        torch.linalg.vector_norm(model.residual_readout.weight.detach()).item()
+                    ),
+                }
+            )
         if hasattr(model, "apply_monotonic_constraints"):
             model.apply_monotonic_constraints()
         order_diagnostics = paper_order_diagnostics(
@@ -543,6 +632,7 @@ def train_paper_lost_sales_fcnn(
             "monotonicity_penalty_weight": float(monotonicity_penalty_weight),
             "elapsed_seconds": float(time.perf_counter() - start_time),
             **order_diagnostics,
+            **residual_diagnostics,
         }
 
         return log_row, float(primary_loss.detach().item())
