@@ -1,6 +1,8 @@
-# Proposed Frozen Experiment Protocol
+# Frozen Experiment Protocol
 
-Status: proposed for review, not automatically frozen.
+Status: frozen for the next final evaluation run. Do not tune model classes,
+training schedules, seeds, shift definitions, equivalence margin, or analysis
+logic after viewing final outputs.
 
 ## Models
 
@@ -13,7 +15,9 @@ Status: proposed for review, not automatically frozen.
 
 - Development/compact evidence: `configs/paper_lost_sales_factorial_small.yaml`.
 - Medium/paper-alignment evidence: `configs/paper_lost_sales_fcnn_alignment_medium.yaml`.
-- Final held-out evaluation should use the agreed paper-scale profile once choices are frozen.
+- Final evaluation configuration: `configs/paper_lost_sales_fcnn_alignment_medium.yaml`
+  with the `full` profile unless the team explicitly approves a larger
+  paper-replication profile before running.
 
 ## Action Decoder And Anchor
 
@@ -68,8 +72,52 @@ Use the existing validation-based checkpoint selection in `run_idp_benchmark.py`
 
 ## Equivalence Margin
 
-Proposed development margin: +/- 5 reward per period, reported also as a percentage of mean KAN reward. This must be reviewed before any formal equivalence claim.
+Frozen margin for the next final evaluation: +/- 5 reward per period, reported
+also as a percentage of mean KAN reward.
 
 ## Protected Final Evaluation Rule
 
-Freeze model classes, configs, seeds, equivalence margin, metrics, and analysis script before running a final held-out/paper-scale evaluation. Do not tune after viewing protected final results.
+The protected final evaluation may be run once after this protocol is accepted.
+After viewing protected final results, do not tune architectures, residual scale,
+capacity guards, training schedules, seeds, shift definitions, model-selection
+rules, or analysis logic. If a concrete correctness bug is discovered, document
+the bug and rerun only after recording the invalidated run.
+
+## Final Run Commands
+
+Primary final four-model benchmark:
+
+```bash
+uv run python scripts/run_idp_benchmark.py \
+  --mode structure-ls \
+  --profile full \
+  --config configs/paper_lost_sales_fcnn_alignment_medium.yaml \
+  --models PaperFCNNResidualOrderUpTo,KANResidualOrderUpTo,ConstrainedMLPResidualOrderUpTo,MonoKANResidualOrderUpTo \
+  --output-dir outputs/monokan_final_four_model \
+  --progress
+```
+
+Final paired distribution-shift evaluation:
+
+```bash
+uv run python scripts/run_distribution_shift_multiseed.py \
+  --config configs/paper_lost_sales_fcnn_alignment_medium.yaml \
+  --output-root outputs/monokan_final_distribution_shift_10seed \
+  --seeds 2025,2026,2027,2028,2029,2030,2031,2032,2033,2034 \
+  --profile full \
+  --models PaperFCNNResidualOrderUpTo,KANResidualOrderUpTo,ConstrainedMLPResidualOrderUpTo,MonoKANResidualOrderUpTo \
+  --eval-products 500 \
+  --diagnostic-products 200 \
+  --inventory-states 41 \
+  --vary-product-seed \
+  --progress
+```
+
+Final evidence analysis:
+
+```bash
+uv run python scripts/analyze_monokan_evidence.py \
+  --benchmark-dir outputs/monokan_final_four_model \
+  --multiseed-root outputs/monokan_final_distribution_shift_10seed \
+  --output-dir outputs/analysis_final
+```

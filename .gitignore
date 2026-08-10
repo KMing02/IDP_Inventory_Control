@@ -10,6 +10,7 @@ htmlcov/
 venv/
 env/
 .env
+uv.lock
 build/
 dist/
 *.egg-info/
