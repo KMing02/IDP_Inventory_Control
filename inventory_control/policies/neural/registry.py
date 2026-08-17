@@ -13,11 +13,14 @@ from inventory_control.policies.neural.constrained_mlp import (
     make_positive_weight_mlp_model,
 )
 from inventory_control.policies.neural.fcnn import (
+    make_paper_base_stock_output_fcnn_model,
     make_paper_fcnn_model,
     make_paper_order_up_to_fcnn_model,
     make_paper_residual_order_up_to_fcnn_model,
 )
 from inventory_control.policies.neural.monokan import (
+    make_paper_base_stock_output_kan_model,
+    make_paper_base_stock_output_monokan_model,
     make_paper_monokan_model,
     make_paper_order_up_to_monokan_model,
     make_paper_residual_order_up_to_kan_model,
@@ -44,11 +47,19 @@ NEURAL_POLICY_SPECS: tuple[NeuralPolicySpec, ...] = (
     NeuralPolicySpec("PaperFCNN", make_paper_fcnn_model, "paper_fcnn.pt", "fcnn", 0, 0),
     NeuralPolicySpec("PaperFCNNOrderUpTo", make_paper_order_up_to_fcnn_model, "paper_fcnn_order_up_to.pt", "fcnn", 1, 201),
     NeuralPolicySpec(
+        "PaperFCNNBaseStockOrderUpTo",
+        make_paper_base_stock_output_fcnn_model,
+        "paper_fcnn_base_stock_order_up_to.pt",
+        "fcnn",
+        2,
+        211,
+    ),
+    NeuralPolicySpec(
         "PaperFCNNResidualOrderUpTo",
         make_paper_residual_order_up_to_fcnn_model,
         "paper_fcnn_residual_order_up_to.pt",
         "fcnn",
-        2,
+        3,
         202,
     ),
     NeuralPolicySpec(
@@ -56,26 +67,35 @@ NEURAL_POLICY_SPECS: tuple[NeuralPolicySpec, ...] = (
         make_paper_residual_order_up_to_constrained_mlp_model,
         "constrained_mlp_residual_order_up_to.pt",
         "monotone_mlp",
-        3,
+        4,
         203,
     ),
-    NeuralPolicySpec("PositiveWeightMLP", make_positive_weight_mlp_model, "positive_weight_mlp.pt", "monotone_mlp", 4, 101),
+    NeuralPolicySpec("PositiveWeightMLP", make_positive_weight_mlp_model, "positive_weight_mlp.pt", "monotone_mlp", 5, 101),
     NeuralPolicySpec(
         "ConstrainedMonoMLP",
         make_constrained_monotone_mlp_model,
         "constrained_monotone_mlp.pt",
         "monotone_mlp",
-        5,
+        6,
         102,
     ),
-    NeuralPolicySpec("MonoKAN", make_paper_monokan_model, "monokan.pt", "monokan", 6, 0),
-    NeuralPolicySpec("MonoKANOrderUpTo", make_paper_order_up_to_monokan_model, "monokan_order_up_to.pt", "monokan", 7, 301),
+    NeuralPolicySpec("MonoKAN", make_paper_monokan_model, "monokan.pt", "monokan", 7, 0),
+    NeuralPolicySpec("MonoKANOrderUpTo", make_paper_order_up_to_monokan_model, "monokan_order_up_to.pt", "monokan", 8, 301),
+    NeuralPolicySpec("KANBaseStockOrderUpTo", make_paper_base_stock_output_kan_model, "kan_base_stock_order_up_to.pt", "kan", 9, 311),
+    NeuralPolicySpec(
+        "MonoKANBaseStockOrderUpTo",
+        make_paper_base_stock_output_monokan_model,
+        "monokan_base_stock_order_up_to.pt",
+        "monokan",
+        10,
+        312,
+    ),
     NeuralPolicySpec(
         "KANResidualOrderUpTo",
         make_paper_residual_order_up_to_kan_model,
         "kan_residual_order_up_to.pt",
         "kan",
-        8,
+        11,
         303,
     ),
     NeuralPolicySpec(
@@ -83,10 +103,10 @@ NEURAL_POLICY_SPECS: tuple[NeuralPolicySpec, ...] = (
         make_paper_residual_order_up_to_monokan_model,
         "monokan_residual_order_up_to.pt",
         "monokan",
-        9,
+        12,
         302,
     ),
-    NeuralPolicySpec("PenaltyMLP", make_paper_fcnn_model, "penalty_mlp.pt", "penalty", 10, 0),
+    NeuralPolicySpec("PenaltyMLP", make_paper_fcnn_model, "penalty_mlp.pt", "penalty", 13, 0),
 )
 
 POLICY_SPECS_BY_NAME = {spec.name: spec for spec in NEURAL_POLICY_SPECS}
@@ -96,6 +116,11 @@ RESIDUAL_COMPARISON_POLICY_NAMES = (
     "KANResidualOrderUpTo",
     "ConstrainedMLPResidualOrderUpTo",
     "MonoKANResidualOrderUpTo",
+)
+BASE_STOCK_OUTPUT_POLICY_NAMES = (
+    "PaperFCNNBaseStockOrderUpTo",
+    "KANBaseStockOrderUpTo",
+    "MonoKANBaseStockOrderUpTo",
 )
 DEFAULT_STRUCTURE_POLICY_NAMES = frozenset(
     {

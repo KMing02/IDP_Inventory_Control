@@ -19,7 +19,8 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise ImportError("Install neural dependencies with `python -m pip install -e '.[dev]'`.") from exc
 
-from inventory_control.policies.neural.fcnn import infer_model_device
+from inventory_control.policies.neural.fcnn import PaperFCNNFeatureStats, empirical_newsvendor_target_ratio, infer_model_device
+from inventory_control.products import PaperLostSalesProduct
 
 
 def _positive_elu(x: torch.Tensor) -> torch.Tensor:
@@ -365,8 +366,40 @@ def make_paper_monokan_model(config: dict, metadata: dict | None = None) -> Mono
 
 def make_paper_order_up_to_monokan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
     """Build a MonoKAN model that predicts a normalized order-up-to target."""
+    return _make_paper_base_stock_output_kan_model(config, metadata=metadata, monotonic_vars={})
+
+
+def make_paper_base_stock_output_kan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
+    """Build an unconstrained KAN base-stock-output policy."""
+    return _make_paper_base_stock_output_kan_model(config, metadata=metadata, monotonic_vars={})
+
+
+def make_paper_base_stock_output_monokan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
+    """Build a MonoKAN base-stock-output policy with context comparative statics."""
+    return _make_paper_base_stock_output_kan_model(config, metadata=metadata, monotonic_vars="context")
+
+
+def make_paper_base_stock_output_monokan_model_for_products(
+    config: dict,
+    products: Sequence[PaperLostSalesProduct],
+    feature_stats: PaperFCNNFeatureStats | None = None,
+    metadata: dict | None = None,
+) -> MonoKANPolicy:
+    """Build a MonoKAN base-stock policy initialized at the empirical newsvendor target."""
+    source = dict(metadata or config.get("monokan", {}))
+    source["initial_normalized_target"] = empirical_newsvendor_target_ratio(products, feature_stats=feature_stats)
+    return make_paper_base_stock_output_monokan_model(config, metadata=source)
+
+
+def _make_paper_base_stock_output_kan_model(
+    config: dict,
+    monotonic_vars: dict[int, int] | str,
+    metadata: dict | None = None,
+) -> MonoKANPolicy:
+    """Build a direct base-stock-output KAN model with optional monotonic constraints."""
     source = metadata or config.get("monokan", {})
     history_length = int(source.get("history_length_H", config["history_length_H"]))
+    resolved_monotonic_vars = _paper_context_monotonic_vars(history_length) if monotonic_vars == "context" else dict(monotonic_vars)
     max_order_factor = float(
         source.get(
             "max_order_factor",
@@ -391,7 +424,7 @@ def make_paper_order_up_to_monokan_model(config: dict, metadata: dict | None = N
         bounded_spline_slope_init=float(
             source.get("bounded_spline_slope_init", config.get("monokan", {}).get("bounded_spline_slope_init", 1.0))
         ),
-        monotonic_vars={},
+        monotonic_vars=resolved_monotonic_vars,
         initial_normalized_order=float(source.get("initial_normalized_target", 0.5 * max_order_factor)),
         output_upper_bound=max_order_factor,
     )

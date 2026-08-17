@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+import math
 
 try:
     import torch
@@ -12,6 +13,7 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError("Install neural dependencies with `python -m pip install -r requirements-neural.txt`.") from exc
 
 from inventory_control.products import PaperLostSalesProduct
+from inventory_control.paper_lost_sales import historical_empirical_quantile, paper_critical_quantile
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,23 @@ def compute_paper_fcnn_feature_stats(products: Sequence[PaperLostSalesProduct]) 
     demand_scale = max(sum(historical_values) / len(historical_values), 1.0)
     price_scale = max(sum(prices) / len(prices), 1.0)
     return PaperFCNNFeatureStats(demand_scale=demand_scale, price_scale=price_scale)
+
+
+def empirical_newsvendor_target_ratio(
+    products: Sequence[PaperLostSalesProduct],
+    feature_stats: PaperFCNNFeatureStats | None = None,
+) -> float:
+    """Return a normalized empirical-newsvendor target for base-stock initialization."""
+    del feature_stats
+    ratios: list[float] = []
+    for product in products:
+        quantile = paper_critical_quantile(product)
+        target = historical_empirical_quantile(product, quantile)
+        scale = max(sum(product.historical_demand) / len(product.historical_demand), 1.0)
+        ratios.append(float(target) / max(float(scale), 1.0))
+    if not ratios:
+        return 1.0
+    return float(torch.median(torch.tensor(ratios, dtype=torch.float32)).item())
 
 
 def infer_model_device(model: nn.Module) -> torch.device:
@@ -164,6 +183,25 @@ class PaperContextMLPPolicy(nn.Module):
             return self.output_upper_bound * torch.sigmoid(raw)
         return torch.nn.functional.softplus(raw)
 
+    @torch.no_grad()
+    def initialize_output_bias(self, target_value: float) -> None:
+        """Initialize the final layer to a near-constant target output."""
+        if not isinstance(self.network[-1], nn.Linear):
+            return
+        final_layer = self.network[-1]
+        final_layer.weight.zero_()
+        target = max(float(target_value), 1e-6)
+        if self.output == "signed":
+            target = min(max(target, -1.0 + 1e-6), 1.0 - 1e-6)
+            bias = 0.5 * math.log((1.0 + target) / (1.0 - target))
+        elif self.output_upper_bound is not None:
+            upper = max(float(self.output_upper_bound), 1e-6)
+            target = min(max(target, 1e-6), upper - 1e-6)
+            bias = math.log(target / (upper - target))
+        else:
+            bias = math.log(math.expm1(target))
+        final_layer.bias.fill_(bias)
+
 
 def make_paper_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Module:
     """Build the configured paper policy model."""
@@ -192,19 +230,39 @@ def make_paper_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Modu
 
 def make_paper_order_up_to_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Module:
     """Build an FCNN that predicts a normalized order-up-to target."""
-    source = metadata or config["fcnn"]
+    fcnn_defaults = config.get("fcnn", {})
+    source = metadata or fcnn_defaults
     history_length = int(metadata.get("history_length_H", config["history_length_H"])) if metadata else int(config["history_length_H"])
     model = PaperContextMLPPolicy(
         input_dim=history_length + 4,
-        hidden_layers=int(source.get("hidden_layers", config["fcnn"]["hidden_layers"])),
-        hidden_units=int(source.get("hidden_units", config["fcnn"]["hidden_units"])),
-        activation=str(source.get("activation", config["fcnn"]["activation"])),
+        hidden_layers=int(source.get("hidden_layers", fcnn_defaults.get("hidden_layers", 2))),
+        hidden_units=int(source.get("hidden_units", fcnn_defaults.get("hidden_units", 32))),
+        activation=str(source.get("activation", fcnn_defaults.get("activation", "ELU"))),
         output="positive",
-        output_upper_bound=float(source.get("max_order_factor", config["fcnn"].get("max_order_factor", 4.0))),
+        output_upper_bound=float(source.get("max_order_factor", fcnn_defaults.get("max_order_factor", 4.0))),
     )
     model.paper_action_parameterization = "order_up_to"
     model.paper_scale_target_by_history_mean = bool(source.get("scale_action_by_history_mean", True))
+    if "initial_normalized_target" in source:
+        model.initialize_output_bias(float(source["initial_normalized_target"]))
     return model
+
+
+def make_paper_base_stock_output_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Module:
+    """Build an FCNN base-stock-output policy with optional newsvendor bias init."""
+    return make_paper_order_up_to_fcnn_model(config, metadata=metadata)
+
+
+def make_paper_base_stock_output_fcnn_model_for_products(
+    config: dict,
+    products: Sequence[PaperLostSalesProduct],
+    feature_stats: PaperFCNNFeatureStats | None = None,
+    metadata: dict | None = None,
+) -> nn.Module:
+    """Build an FCNN base-stock policy initialized at the empirical newsvendor target."""
+    source = dict(metadata or config.get("fcnn", {}))
+    source["initial_normalized_target"] = empirical_newsvendor_target_ratio(products, feature_stats=feature_stats)
+    return make_paper_base_stock_output_fcnn_model(config, metadata=source)
 
 
 def make_paper_residual_order_up_to_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Module:
