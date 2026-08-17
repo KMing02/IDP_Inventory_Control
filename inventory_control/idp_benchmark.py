@@ -204,7 +204,8 @@ def _model_orders(
     max_order_factor: float,
     scale_action_by_history_mean: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
-    if getattr(model, "paper_action_parameterization", "raw") == "residual_order_up_to":
+    action_parameterization = getattr(model, "paper_action_parameterization", "raw")
+    if action_parameterization in {"residual_order_up_to", "target_stock"}:
         device = infer_model_device(model)
         historical_mean = max(float(np.mean(product.historical_demand)), 1.0)
         count = len(inventories)
@@ -216,17 +217,18 @@ def _model_orders(
             ),
             "feature_price_scale": torch.full((count,), feature_stats.price_scale, dtype=torch.float32, device=device),
             "historical_mean_demand": torch.full((count,), historical_mean, dtype=torch.float32, device=device),
-            "historical_base_stock_level": torch.full(
-                (count,),
-                float(non_omniscient_gamma_base_stock_policy(product).S),
-                dtype=torch.float32,
-                device=device,
-            ),
             "price": torch.full((count,), float(product.price), dtype=torch.float32, device=device),
             "purchase_cost": torch.full((count,), float(product.purchase_cost), dtype=torch.float32, device=device),
             "holding_cost": torch.full((count,), float(product.holding_cost), dtype=torch.float32, device=device),
             "lost_sale_penalty": torch.full((count,), float(product.lost_sale_penalty), dtype=torch.float32, device=device),
         }
+        if action_parameterization == "residual_order_up_to":
+            batch["historical_base_stock_level"] = torch.full(
+                (count,),
+                float(non_omniscient_gamma_base_stock_policy(product).S),
+                dtype=torch.float32,
+                device=device,
+            )
         inventory_tensor = torch.tensor(inventories, dtype=torch.float32, device=device)
         model.eval()
         with torch.no_grad():

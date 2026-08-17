@@ -152,8 +152,11 @@ def paper_lost_sales_raw_order(
     scale_action_by_history_mean: bool = False,
 ) -> torch.Tensor:
     """Return uncapped policy orders for a batch and inventory vector."""
-    if getattr(model, "paper_action_parameterization", "raw") == "residual_order_up_to":
+    action_parameterization = getattr(model, "paper_action_parameterization", "raw")
+    if action_parameterization == "residual_order_up_to":
         return torch.relu(paper_lost_sales_target_level(model, batch) - inventory)
+    if action_parameterization == "target_stock":
+        return torch.relu(paper_lost_sales_target_stock_level(model, batch) - inventory)
     demand_scale = torch.clamp(batch["feature_demand_scale"], min=1.0)
     price_scale = torch.clamp(batch["feature_price_scale"], min=1.0)
     economics = torch.stack(
@@ -223,6 +226,25 @@ def paper_lost_sales_context_features(batch: dict[str, torch.Tensor]) -> torch.T
         dim=1,
     )
     return torch.cat([batch["history"], economics], dim=1)
+
+
+def paper_lost_sales_target_stock_level(
+    model: nn.Module,
+    batch: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    """Decode a context-only normalized target-stock prediction.
+
+    The model predicts the dimensionless positive multiple ``s_theta``. The
+    physical target level is ``historical_mean_demand * s_theta``. No
+    product-specific analytical anchor participates in this decoder.
+    """
+    if getattr(model, "paper_action_parameterization", "raw") != "target_stock":
+        raise ValueError("model does not use target_stock parameterization")
+    if getattr(model, "paper_target_stock_scale", "historical_mean_demand") != "historical_mean_demand":
+        raise ValueError("target-stock policies must scale by historical_mean_demand")
+    historical_mean = torch.clamp(batch["historical_mean_demand"], min=1.0)
+    normalized_target = model(paper_lost_sales_context_features(batch))
+    return historical_mean * normalized_target
 
 
 def paper_lost_sales_target_level(
