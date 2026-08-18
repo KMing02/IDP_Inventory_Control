@@ -39,6 +39,7 @@ class BaseStockOutputArtifacts:
     output_dir: Path
     summary: pd.DataFrame
     training_log: pd.DataFrame
+    target_diagnostics: pd.DataFrame
     metadata: dict[str, Any]
 
 
@@ -46,6 +47,7 @@ def run_base_stock_output_experiment(
     config_path: str | Path = "configs/paper_lost_sales_debug.yaml",
     output_dir: str | Path = "outputs/base_stock_output_smoke",
     models: tuple[str, ...] = BASE_STOCK_OUTPUT_POLICY_NAMES,
+    device: str | None = None,
 ) -> BaseStockOutputArtifacts:
     """Run a no-imitation direct base-stock-output comparison."""
     unknown = sorted(set(models) - set(BASE_STOCK_OUTPUT_POLICY_NAMES))
@@ -54,6 +56,8 @@ def run_base_stock_output_experiment(
 
     config = load_paper_lost_sales_config(config_path)
     settings = _compact_settings(config)
+    if device is not None:
+        settings["device"] = str(device)
     destination = Path(output_dir)
     generator = PaperLostSalesProductGenerator(config)
     train_products = generator.generate(settings["training_products"], split="train")
@@ -63,6 +67,7 @@ def run_base_stock_output_experiment(
 
     summary_rows: list[dict[str, Any]] = []
     log_frames: list[pd.DataFrame] = []
+    target_frames: list[pd.DataFrame] = []
     for model_name in models:
         spec = POLICY_SPECS_BY_NAME[model_name]
         torch.manual_seed(settings["seed"] + spec.seed_offset)
@@ -82,11 +87,15 @@ def run_base_stock_output_experiment(
             max_order_factor=settings["max_order_factor"],
             normalize_reward_loss=settings["normalize_reward_loss"],
             training_demand_mode=settings["training_demand_mode"],
+            history_feature_mode=settings["paper_history_feature_mode"],
+            device=settings["device"],
         )
+        target_diagnostic = _target_diagnostics(model, model_name, validation_products, feature_stats, settings)
         summary_rows.append(
             {
                 "policy_name": model_name,
                 **_evaluate_model(model, validation_products, feature_stats, settings),
+                **_target_summary(target_diagnostic),
                 "training_epochs": settings["reward_epochs"],
                 "imitation_epochs": 0,
                 "initial_target_ratio": initial_target_ratio,
@@ -96,16 +105,19 @@ def run_base_stock_output_experiment(
             }
         )
         log_frames.append(_training_log_frame(result, model_name))
+        target_frames.append(target_diagnostic)
 
     historical = [_evaluate_historical(product, settings, index) for index, product in enumerate(validation_products)]
     summary_rows.append({"policy_name": "HistoricalDemandBaseStock", **_mean_metrics(historical)})
     summary = pd.DataFrame(summary_rows)
     training_log = pd.concat(log_frames, ignore_index=True) if log_frames else pd.DataFrame()
+    target_diagnostics = pd.concat(target_frames, ignore_index=True) if target_frames else pd.DataFrame()
     metadata = {
         "config_path": str(config_path),
         "settings": settings,
         "models": list(models),
         "action_parameterization": "NN(z)->S_theta, q=max(S_theta-inventory,0)",
+        "paper_history_feature_mode": settings["paper_history_feature_mode"],
         "initialization": "final output initialized near empirical newsvendor target ratio",
         "imitation_pretraining": False,
     }
@@ -113,8 +125,9 @@ def run_base_stock_output_experiment(
     destination.mkdir(parents=True, exist_ok=True)
     summary.to_csv(destination / "summary.csv", index=False)
     training_log.to_csv(destination / "training_log.csv", index=False)
+    target_diagnostics.to_csv(destination / "target_stock_diagnostics.csv", index=False)
     (destination / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-    return BaseStockOutputArtifacts(destination, summary, training_log, metadata)
+    return BaseStockOutputArtifacts(destination, summary, training_log, target_diagnostics, metadata)
 
 
 def _compact_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -134,6 +147,10 @@ def _compact_settings(config: dict[str, Any]) -> dict[str, Any]:
         "normalize_reward_loss": bool(benchmark.get("normalize_reward_loss", True)),
         "training_demand_mode": str(benchmark.get("training_demand_mode", "fixed_future")),
         "learning_rate": float(config.get("learning_rate", 1e-3)),
+        "device": benchmark.get("device"),
+        "paper_history_feature_mode": str(
+            benchmark.get("paper_history_feature_mode", config.get("paper_history_feature_mode", "raw_lags"))
+        ),
     }
 
 
@@ -163,7 +180,13 @@ def _evaluate_model(
 ) -> dict[str, float]:
     rows = []
     for index, product in enumerate(products):
-        policy = _TorchBaseStockPolicyAdapter(model, product, feature_stats, settings["max_order_factor"])
+        policy = _TorchBaseStockPolicyAdapter(
+            model,
+            product,
+            feature_stats,
+            settings["max_order_factor"],
+            settings["paper_history_feature_mode"],
+        )
         rows.append(
             evaluate_paper_lost_sales_policy(
                 product,
@@ -186,12 +209,14 @@ class _TorchBaseStockPolicyAdapter:
         product: PaperLostSalesProduct,
         feature_stats: PaperFCNNFeatureStats,
         max_order_factor: float,
+        history_feature_mode: str = "raw_lags",
     ) -> None:
         self.name = getattr(model, "name", "NeuralBaseStockOrderUpTo")
         self.model = model
         self.product = product
         self.feature_stats = feature_stats
         self.max_order_factor = float(max_order_factor)
+        self.history_feature_mode = history_feature_mode
 
     def act(self, inventory: float, t: int, rng=None) -> float:
         from inventory_control.policies.neural.fcnn import build_paper_lost_sales_features, infer_model_device
@@ -206,6 +231,7 @@ class _TorchBaseStockPolicyAdapter:
                     holding_cost=self.product.holding_cost,
                     lost_sale_penalty=self.product.lost_sale_penalty,
                     feature_stats=self.feature_stats,
+                    history_feature_mode=self.history_feature_mode,
                 )
             ],
             dtype=torch.float32,
@@ -233,6 +259,70 @@ def _evaluate_historical(
         seed=settings["seed"] + 10_000 + index,
         burn_in=settings["burn_in"],
     )
+
+
+def _target_diagnostics(
+    model: nn.Module,
+    model_name: str,
+    products: list[PaperLostSalesProduct],
+    feature_stats: PaperFCNNFeatureStats,
+    settings: dict[str, Any],
+) -> pd.DataFrame:
+    """Return per-product target-stock scale diagnostics for base-stock-output models."""
+    from inventory_control.policies.neural.fcnn import build_paper_lost_sales_features, infer_model_device
+
+    rows: list[dict[str, float | str]] = []
+    device = infer_model_device(model)
+    model.eval()
+    for product in products:
+        historical_mean = max(sum(product.historical_demand) / len(product.historical_demand), 1.0)
+        empirical_base_stock = historical_demand_base_stock_policy(product).S
+        features = torch.tensor(
+            [
+                build_paper_lost_sales_features(
+                    inventory=0.0,
+                    historical_demand=product.historical_demand,
+                    price=product.price,
+                    purchase_cost=product.purchase_cost,
+                    holding_cost=product.holding_cost,
+                    lost_sale_penalty=product.lost_sale_penalty,
+                    feature_stats=feature_stats,
+                    history_feature_mode=settings["paper_history_feature_mode"],
+                )
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+        with torch.no_grad():
+            target_factor = float(model(features[:, 1:]).item())
+        target_stock = target_factor * historical_mean
+        rows.append(
+            {
+                "policy_name": model_name,
+                "product_id": product.product_id,
+                "target_factor": target_factor,
+                "target_stock": target_stock,
+                "historical_mean_demand": historical_mean,
+                "historical_base_stock": float(empirical_base_stock),
+                "target_minus_historical_base_stock": target_stock - float(empirical_base_stock),
+                "target_to_historical_base_stock_ratio": target_stock / max(float(empirical_base_stock), 1e-6),
+                "near_upper_bound": float(target_factor >= 0.95 * float(settings["max_order_factor"])),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _target_summary(target_diagnostics: pd.DataFrame) -> dict[str, float]:
+    """Return compact target-scale summaries for the main results table."""
+    return {
+        "target_factor_mean": float(target_diagnostics["target_factor"].mean()),
+        "target_factor_q90": float(target_diagnostics["target_factor"].quantile(0.9)),
+        "target_stock_mean": float(target_diagnostics["target_stock"].mean()),
+        "target_minus_historical_base_stock_mean": float(
+            target_diagnostics["target_minus_historical_base_stock"].mean()
+        ),
+        "near_upper_bound_rate": float(target_diagnostics["near_upper_bound"].mean()),
+    }
 
 
 def _mean_metrics(rows: list[dict[str, float]]) -> dict[str, float]:

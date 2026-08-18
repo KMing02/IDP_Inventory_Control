@@ -14,7 +14,12 @@ except ImportError as exc:  # pragma: no cover
 
 from torch import nn
 
-from inventory_control.policies.neural.fcnn import FCNNPolicy, PaperFCNNFeatureStats, infer_model_device
+from inventory_control.policies.neural.fcnn import (
+    FCNNPolicy,
+    PaperFCNNFeatureStats,
+    build_paper_history_features,
+    infer_model_device,
+)
 from inventory_control.paper_lost_sales import non_omniscient_gamma_base_stock_policy
 from inventory_control.paper_lost_sales import historical_empirical_quantile, paper_critical_quantile
 from inventory_control.products import PaperLostSalesProduct
@@ -68,6 +73,7 @@ def make_paper_lost_sales_training_batch(
     feature_stats: PaperFCNNFeatureStats | None = None,
     demand_mode: str = "fixed_future",
     residual_anchor: str = "gamma",
+    history_feature_mode: str = "raw_lags",
 ) -> dict[str, torch.Tensor]:
     """Build a tensor batch using only historical demand observations."""
     if demand_mode not in {"fixed_future", "resample"}:
@@ -90,7 +96,12 @@ def make_paper_lost_sales_training_batch(
                 torch.tensor(product.sample_demand(_torch_seeded_numpy_rng(generator), size=horizon), dtype=torch.float32)
             )
         scale = torch.tensor(demand_scale, dtype=torch.float32) if feature_stats is not None else torch.clamp(history.mean(), min=1.0)
-        histories.append(history / scale)
+        histories.append(
+            torch.tensor(
+                build_paper_history_features(history.tolist(), float(scale.item()), mode=history_feature_mode),
+                dtype=torch.float32,
+            )
+        )
     return {
         "initial_inventory": torch.tensor(
             [
@@ -604,6 +615,7 @@ def train_paper_lost_sales_fcnn(
     scale_l2_weight: float = 0.0,
     training_demand_mode: str = "fixed_future",
     residual_anchor: str = "gamma",
+    history_feature_mode: str | None = None,
     include_terminal_salvage: bool = True,
     clip_imitation_predictions: bool = True,
     device: torch.device | str | None = None,
@@ -631,6 +643,9 @@ def train_paper_lost_sales_fcnn(
     best_imitation_state_dict: dict[str, torch.Tensor] | None = None
     total_epochs = imitation_epochs + epochs
     start_time = time.perf_counter()
+    effective_history_feature_mode = str(
+        history_feature_mode or getattr(model, "paper_history_feature_mode", "raw_lags")
+    )
     for epoch in range(total_epochs):
         indices = torch.randint(0, len(products), (batch_size,), generator=generator).tolist()
         batch_products = [products[index] for index in indices]
@@ -642,6 +657,7 @@ def train_paper_lost_sales_fcnn(
                 feature_stats=feature_stats,
                 demand_mode=training_demand_mode,
                 residual_anchor=residual_anchor,
+                history_feature_mode=effective_history_feature_mode,
             ),
             infer_model_device(model),
         )
@@ -790,6 +806,7 @@ def train_paper_lost_sales_fcnn(
                     feature_stats=feature_stats,
                     demand_mode="fixed_future",
                     residual_anchor=residual_anchor,
+                    history_feature_mode=effective_history_feature_mode,
                 )
                 validation_batch = move_batch_to_device(validation_batch, infer_model_device(model))
                 with torch.no_grad():

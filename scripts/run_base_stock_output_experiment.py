@@ -22,12 +22,14 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path("configs/paper_lost_sales_debug.yaml"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/base_stock_output_smoke"))
     parser.add_argument("--models", nargs="+", choices=BASE_STOCK_OUTPUT_POLICY_NAMES, default=list(BASE_STOCK_OUTPUT_POLICY_NAMES))
+    parser.add_argument("--device", choices=["cpu", "mps", "cuda"], help="Override the torch training device.")
     args = parser.parse_args()
 
     artifacts = run_base_stock_output_experiment(
         config_path=args.config,
         output_dir=args.output_dir,
         models=tuple(args.models),
+        device=args.device,
     )
     print(artifacts.summary.to_string(index=False))
     print(f"saved_artifacts={artifacts.output_dir}")
