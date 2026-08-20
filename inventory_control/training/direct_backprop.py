@@ -18,6 +18,7 @@ from inventory_control.policies.neural.fcnn import (
     FCNNPolicy,
     PaperFCNNFeatureStats,
     build_paper_history_features,
+    empirical_newsvendor_target_ratio_from_features,
     infer_model_device,
 )
 from inventory_control.paper_lost_sales import non_omniscient_gamma_base_stock_policy
@@ -74,6 +75,7 @@ def make_paper_lost_sales_training_batch(
     demand_mode: str = "fixed_future",
     residual_anchor: str = "gamma",
     history_feature_mode: str = "raw_lags",
+    include_newsvendor_feature: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Build a tensor batch using only historical demand observations."""
     if demand_mode not in {"fixed_future", "resample"}:
@@ -82,6 +84,7 @@ def make_paper_lost_sales_training_batch(
         raise ValueError(f"Unsupported residual anchor: {residual_anchor}")
     demand_paths = []
     histories = []
+    newsvendor_features = []
     demand_scale = 1.0
     price_scale = 1.0
     if feature_stats is not None:
@@ -102,7 +105,17 @@ def make_paper_lost_sales_training_batch(
                 dtype=torch.float32,
             )
         )
-    return {
+        if include_newsvendor_feature:
+            newsvendor_features.append(
+                empirical_newsvendor_target_ratio_from_features(
+                    product.historical_demand,
+                    product.price,
+                    product.purchase_cost,
+                    product.holding_cost,
+                    product.lost_sale_penalty,
+                )
+            )
+    batch = {
         "initial_inventory": torch.tensor(
             [
                 float(torch.rand((), generator=generator).item())
@@ -136,6 +149,9 @@ def make_paper_lost_sales_training_batch(
         ),
         "demand_paths": torch.stack(demand_paths, dim=0),
     }
+    if include_newsvendor_feature:
+        batch["empirical_newsvendor_target_ratio"] = torch.tensor(newsvendor_features, dtype=torch.float32)
+    return batch
 
 
 def _torch_seeded_numpy_rng(generator: torch.Generator):
@@ -220,7 +236,10 @@ def paper_lost_sales_features(
         ],
         dim=1,
     )
-    return torch.cat([(inventory / demand_scale).unsqueeze(-1), batch["history"], economics], dim=1)
+    context_parts = [batch["history"], economics]
+    if "empirical_newsvendor_target_ratio" in batch:
+        context_parts.append(batch["empirical_newsvendor_target_ratio"].unsqueeze(-1))
+    return torch.cat([(inventory / demand_scale).unsqueeze(-1), *context_parts], dim=1)
 
 
 def paper_lost_sales_context_features(batch: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -235,7 +254,10 @@ def paper_lost_sales_context_features(batch: dict[str, torch.Tensor]) -> torch.T
         ],
         dim=1,
     )
-    return torch.cat([batch["history"], economics], dim=1)
+    context_parts = [batch["history"], economics]
+    if "empirical_newsvendor_target_ratio" in batch:
+        context_parts.append(batch["empirical_newsvendor_target_ratio"].unsqueeze(-1))
+    return torch.cat(context_parts, dim=1)
 
 
 def paper_lost_sales_uncapped_order(
@@ -616,6 +638,7 @@ def train_paper_lost_sales_fcnn(
     training_demand_mode: str = "fixed_future",
     residual_anchor: str = "gamma",
     history_feature_mode: str | None = None,
+    include_newsvendor_feature: bool | None = None,
     include_terminal_salvage: bool = True,
     clip_imitation_predictions: bool = True,
     device: torch.device | str | None = None,
@@ -646,6 +669,11 @@ def train_paper_lost_sales_fcnn(
     effective_history_feature_mode = str(
         history_feature_mode or getattr(model, "paper_history_feature_mode", "raw_lags")
     )
+    effective_include_newsvendor_feature = bool(
+        getattr(model, "paper_include_newsvendor_feature", False)
+        if include_newsvendor_feature is None
+        else include_newsvendor_feature
+    )
     for epoch in range(total_epochs):
         indices = torch.randint(0, len(products), (batch_size,), generator=generator).tolist()
         batch_products = [products[index] for index in indices]
@@ -658,6 +686,7 @@ def train_paper_lost_sales_fcnn(
                 demand_mode=training_demand_mode,
                 residual_anchor=residual_anchor,
                 history_feature_mode=effective_history_feature_mode,
+                include_newsvendor_feature=effective_include_newsvendor_feature,
             ),
             infer_model_device(model),
         )
@@ -807,6 +836,7 @@ def train_paper_lost_sales_fcnn(
                     demand_mode="fixed_future",
                     residual_anchor=residual_anchor,
                     history_feature_mode=effective_history_feature_mode,
+                    include_newsvendor_feature=effective_include_newsvendor_feature,
                 )
                 validation_batch = move_batch_to_device(validation_batch, infer_model_device(model))
                 with torch.no_grad():

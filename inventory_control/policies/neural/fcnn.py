@@ -64,6 +64,15 @@ def paper_history_feature_count(history_length: int, mode: str = "raw_lags") -> 
     raise ValueError(f"unsupported paper history feature mode: {mode!r}")
 
 
+def paper_context_feature_count(
+    history_length: int,
+    mode: str = "raw_lags",
+    include_newsvendor_feature: bool = False,
+) -> int:
+    """Return context-feature dimensionality excluding current inventory."""
+    return paper_history_feature_count(history_length, mode) + 4 + int(include_newsvendor_feature)
+
+
 def build_paper_history_features(
     historical_demand: Sequence[float],
     demand_scale: float,
@@ -97,6 +106,23 @@ def build_paper_history_features(
         float(quantiles[1].item()) / scale,
         float(quantiles[2].item()) / scale,
     ]
+
+
+def empirical_newsvendor_target_ratio_from_features(
+    historical_demand: Sequence[float],
+    price: float,
+    purchase_cost: float,
+    holding_cost: float,
+    lost_sale_penalty: float,
+) -> float:
+    """Return the observable empirical newsvendor target normalized by product history mean."""
+    history = [float(value) for value in historical_demand]
+    scale = max(sum(history) / len(history), 1.0)
+    numerator = float(price) + float(lost_sale_penalty) - float(purchase_cost)
+    denominator = numerator + float(holding_cost)
+    critical = min(max(numerator / denominator, 0.0), 1.0) if denominator > 0 else 0.0
+    target = torch.quantile(torch.tensor(history, dtype=torch.float32), torch.tensor(critical, dtype=torch.float32))
+    return float(target.item()) / scale
 
 
 def infer_model_device(model: nn.Module) -> torch.device:
@@ -205,11 +231,17 @@ class PaperContextMLPPolicy(nn.Module):
         activation: str = "ELU",
         output: str = "positive",
         output_upper_bound: float | None = None,
+        output_logit_anchor_feature_index: int | None = None,
+        output_logit_residual_scale: float = 1.0,
     ) -> None:
         super().__init__()
         self.input_dim = int(input_dim)
         self.output = output
         self.output_upper_bound = float(output_upper_bound) if output_upper_bound is not None else None
+        self.output_logit_anchor_feature_index = (
+            int(output_logit_anchor_feature_index) if output_logit_anchor_feature_index is not None else None
+        )
+        self.output_logit_residual_scale = float(output_logit_residual_scale)
         activation_cls = getattr(nn, activation)
         layers: list[nn.Module] = []
         previous_dim = self.input_dim
@@ -227,6 +259,12 @@ class PaperContextMLPPolicy(nn.Module):
         if self.output == "signed":
             return torch.tanh(raw)
         if self.output_upper_bound is not None:
+            if self.output_logit_anchor_feature_index is not None:
+                anchor = context[:, self.output_logit_anchor_feature_index]
+                fraction = torch.clamp(anchor / self.output_upper_bound, min=1e-6, max=1.0 - 1e-6)
+                return self.output_upper_bound * torch.sigmoid(
+                    torch.logit(fraction) + self.output_logit_residual_scale * raw
+                )
             return self.output_upper_bound * torch.sigmoid(raw)
         return torch.nn.functional.softplus(raw)
 
@@ -237,6 +275,9 @@ class PaperContextMLPPolicy(nn.Module):
             return
         final_layer = self.network[-1]
         final_layer.weight.zero_()
+        if self.output_upper_bound is not None and self.output_logit_anchor_feature_index is not None:
+            final_layer.bias.zero_()
+            return
         target = max(float(target_value), 1e-6)
         if self.output == "signed":
             target = min(max(target, -1.0 + 1e-6), 1.0 - 1e-6)
@@ -281,20 +322,26 @@ def make_paper_order_up_to_fcnn_model(config: dict, metadata: dict | None = None
     source = metadata or fcnn_defaults
     history_length = int(metadata.get("history_length_H", config["history_length_H"])) if metadata else int(config["history_length_H"])
     history_feature_mode = str(source.get("paper_history_feature_mode", config.get("paper_history_feature_mode", "raw_lags")))
-    history_features = paper_history_feature_count(history_length, history_feature_mode)
+    include_newsvendor_feature = bool(
+        source.get("paper_include_newsvendor_feature", config.get("paper_include_newsvendor_feature", False))
+    )
+    context_features = paper_context_feature_count(history_length, history_feature_mode, include_newsvendor_feature)
     model = PaperContextMLPPolicy(
-        input_dim=history_features + 4,
+        input_dim=context_features,
         hidden_layers=int(source.get("hidden_layers", fcnn_defaults.get("hidden_layers", 2))),
         hidden_units=int(source.get("hidden_units", fcnn_defaults.get("hidden_units", 32))),
         activation=str(source.get("activation", fcnn_defaults.get("activation", "ELU"))),
         output="positive",
         output_upper_bound=float(source.get("max_order_factor", fcnn_defaults.get("max_order_factor", 4.0))),
+        output_logit_anchor_feature_index=context_features - 1 if include_newsvendor_feature else None,
+        output_logit_residual_scale=float(source.get("base_stock_logit_residual_scale", 1.0)),
     )
     model.paper_action_parameterization = "order_up_to"
     model.paper_scale_target_by_history_mean = bool(source.get("scale_action_by_history_mean", True))
     model.paper_history_feature_mode = history_feature_mode
-    if "initial_normalized_target" in source:
-        model.initialize_output_bias(float(source["initial_normalized_target"]))
+    model.paper_include_newsvendor_feature = include_newsvendor_feature
+    if include_newsvendor_feature or "initial_normalized_target" in source:
+        model.initialize_output_bias(float(source.get("initial_normalized_target", 1.0)))
     return model
 
 
@@ -320,9 +367,12 @@ def make_paper_residual_order_up_to_fcnn_model(config: dict, metadata: dict | No
     source = metadata or config["fcnn"]
     history_length = int(metadata.get("history_length_H", config["history_length_H"])) if metadata else int(config["history_length_H"])
     history_feature_mode = str(source.get("paper_history_feature_mode", config.get("paper_history_feature_mode", "raw_lags")))
-    history_features = paper_history_feature_count(history_length, history_feature_mode)
+    include_newsvendor_feature = bool(
+        source.get("paper_include_newsvendor_feature", config.get("paper_include_newsvendor_feature", False))
+    )
+    context_features = paper_context_feature_count(history_length, history_feature_mode, include_newsvendor_feature)
     model = PaperContextMLPPolicy(
-        input_dim=history_features + 4,
+        input_dim=context_features,
         hidden_layers=int(source.get("hidden_layers", config["fcnn"]["hidden_layers"])),
         hidden_units=int(source.get("hidden_units", config["fcnn"]["hidden_units"])),
         activation=str(source.get("activation", config["fcnn"]["activation"])),
@@ -332,6 +382,7 @@ def make_paper_residual_order_up_to_fcnn_model(config: dict, metadata: dict | No
     model.paper_residual_scale = float(source.get("residual_scale", 0.5))
     model.paper_residual_anchor = str(source.get("residual_anchor", "gamma"))
     model.paper_history_feature_mode = history_feature_mode
+    model.paper_include_newsvendor_feature = include_newsvendor_feature
     return model
 
 
@@ -344,6 +395,7 @@ def build_paper_lost_sales_features(
     lost_sale_penalty: float,
     feature_stats: PaperFCNNFeatureStats | None = None,
     history_feature_mode: str = "raw_lags",
+    include_newsvendor_feature: bool = False,
 ) -> list[float]:
     """Build observable FCNN features without hidden Gamma parameters."""
     history = [float(value) for value in historical_demand]
@@ -353,13 +405,26 @@ def build_paper_lost_sales_features(
     else:
         demand_scale = feature_stats.demand_scale
         price_scale = feature_stats.price_scale
-    return [
-        float(inventory) / demand_scale,
+    context = [
         *build_paper_history_features(history, demand_scale, mode=history_feature_mode),
         float(price) / price_scale,
         float(purchase_cost) / price_scale,
         float(holding_cost) / price_scale,
         float(lost_sale_penalty) / price_scale,
+    ]
+    if include_newsvendor_feature:
+        context.append(
+            empirical_newsvendor_target_ratio_from_features(
+                history,
+                price,
+                purchase_cost,
+                holding_cost,
+                lost_sale_penalty,
+            )
+        )
+    return [
+        float(inventory) / demand_scale,
+        *context,
     ]
 
 
@@ -377,6 +442,7 @@ class PaperFCNNPolicyAdapter:
         scale_action_by_history_mean: bool = False,
         max_order_multiplier: float | None = None,
         history_feature_mode: str = "raw_lags",
+        include_newsvendor_feature: bool = False,
     ) -> None:
         self.model = model
         self.product = product
@@ -384,6 +450,7 @@ class PaperFCNNPolicyAdapter:
         self.max_order_factor = max_order_factor if max_order_multiplier is None else max_order_multiplier
         self.scale_action_by_history_mean = scale_action_by_history_mean
         self.history_feature_mode = history_feature_mode
+        self.include_newsvendor_feature = include_newsvendor_feature
 
     def act(self, inventory: float, t: int, rng=None) -> float:
         """Return non-negative continuous order quantity."""
@@ -398,6 +465,7 @@ class PaperFCNNPolicyAdapter:
                     lost_sale_penalty=self.product.lost_sale_penalty,
                     feature_stats=self.feature_stats,
                     history_feature_mode=self.history_feature_mode,
+                    include_newsvendor_feature=self.include_newsvendor_feature,
                 )
             ],
             dtype=torch.float32,

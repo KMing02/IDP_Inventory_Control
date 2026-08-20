@@ -23,6 +23,7 @@ from inventory_control.policies.neural.fcnn import (
     PaperFCNNFeatureStats,
     empirical_newsvendor_target_ratio,
     infer_model_device,
+    paper_context_feature_count,
     paper_history_feature_count,
 )
 from inventory_control.products import PaperLostSalesProduct
@@ -184,12 +185,16 @@ class MonoKANPolicy(nn.Module):
         initial_normalized_order: float = 0.5,
         output_upper_bound: float | None = None,
         output_logit_anchor: float | None = None,
+        output_logit_anchor_feature_index: int | None = None,
         output_logit_residual_scale: float = 1.0,
     ) -> None:
         super().__init__()
         self.monotonic_vars = dict(monotonic_vars or {})
         self.output_upper_bound = float(output_upper_bound) if output_upper_bound is not None else None
         self.output_logit_anchor = float(output_logit_anchor) if output_logit_anchor is not None else None
+        self.output_logit_anchor_feature_index = (
+            int(output_logit_anchor_feature_index) if output_logit_anchor_feature_index is not None else None
+        )
         self.output_logit_residual_scale = float(output_logit_residual_scale)
         self.bounded_base_scale_init = bounded_base_scale_init
         self.bounded_spline_scale_init = float(bounded_spline_scale_init)
@@ -231,7 +236,11 @@ class MonoKANPolicy(nn.Module):
         for layer in self.layers:
             x = layer(x)
         if self.output_upper_bound is not None:
-            if self.output_logit_anchor is not None:
+            if self.output_logit_anchor_feature_index is not None:
+                anchor = features[:, self.output_logit_anchor_feature_index]
+                fraction = torch.clamp(anchor / self.output_upper_bound, min=1e-6, max=1.0 - 1e-6)
+                x = torch.logit(fraction).unsqueeze(-1) + self.output_logit_residual_scale * x
+            elif self.output_logit_anchor is not None:
                 x = self.output_logit_anchor + self.output_logit_residual_scale * x
             return (self.output_upper_bound * torch.sigmoid(x)).squeeze(-1)
         return torch.nn.functional.softplus(x).squeeze(-1)
@@ -239,6 +248,13 @@ class MonoKANPolicy(nn.Module):
     @torch.no_grad()
     def _calibrate_initial_output(self, target_order: float) -> None:
         """Set the final bias to a stable normalized order at a reference input."""
+        if self.output_upper_bound is not None and self.output_logit_anchor_feature_index is not None:
+            final_layer = self.layers[-1]
+            final_layer.scale_base.zero_()
+            final_layer.scale_spline.zero_()
+            final_layer.coef.zero_()
+            final_layer.bias.zero_()
+            return
         if target_order <= 0:
             raise ValueError("initial_normalized_order must be positive")
         if self.output_upper_bound is not None:
@@ -251,7 +267,7 @@ class MonoKANPolicy(nn.Module):
             x = layer(x)
         if self.output_upper_bound is None:
             target_pre_activation = torch.log(torch.expm1(torch.tensor(target_order, device=x.device)))
-        elif self.output_logit_anchor is not None:
+        elif self.output_logit_anchor is not None or self.output_logit_anchor_feature_index is not None:
             target_pre_activation = torch.zeros((), device=x.device)
         else:
             target_fraction = torch.tensor(target_order / self.output_upper_bound, device=x.device)
@@ -414,9 +430,13 @@ def _make_paper_base_stock_output_kan_model(
     source = metadata or config.get("monokan", {})
     history_length = int(source.get("history_length_H", config["history_length_H"]))
     history_feature_mode = str(source.get("paper_history_feature_mode", config.get("paper_history_feature_mode", "raw_lags")))
+    include_newsvendor_feature = bool(
+        source.get("paper_include_newsvendor_feature", config.get("paper_include_newsvendor_feature", False))
+    )
     history_features = paper_history_feature_count(history_length, history_feature_mode)
+    context_features = paper_context_feature_count(history_length, history_feature_mode, include_newsvendor_feature)
     resolved_monotonic_vars = (
-        _paper_context_monotonic_vars(history_features, history_feature_mode)
+        _paper_context_monotonic_vars(history_features, history_feature_mode, include_newsvendor_feature)
         if monotonic_vars == "context"
         else dict(monotonic_vars)
     )
@@ -430,7 +450,7 @@ def _make_paper_base_stock_output_kan_model(
     target_fraction = min(max(initial_target / max_order_factor, 1e-6), 1.0 - 1e-6)
     output_logit_anchor = torch.logit(torch.tensor(target_fraction)).item() if use_logit_residual else None
     model = MonoKANPolicy(
-        input_dim=history_features + 4,
+        input_dim=context_features,
         hidden_layers=int(source.get("hidden_layers", config.get("monokan", {}).get("hidden_layers", 1))),
         hidden_units=int(source.get("hidden_units", config.get("monokan", {}).get("hidden_units", 16))),
         grid=int(source.get("grid", config.get("monokan", {}).get("grid", 5))),
@@ -451,11 +471,13 @@ def _make_paper_base_stock_output_kan_model(
         initial_normalized_order=initial_target,
         output_upper_bound=max_order_factor,
         output_logit_anchor=output_logit_anchor,
+        output_logit_anchor_feature_index=context_features - 1 if use_logit_residual and include_newsvendor_feature else None,
         output_logit_residual_scale=float(source.get("base_stock_logit_residual_scale", 0.25)) if use_logit_residual else 1.0,
     )
     model.paper_action_parameterization = "order_up_to"
     model.paper_scale_target_by_history_mean = bool(source.get("scale_action_by_history_mean", True))
     model.paper_history_feature_mode = history_feature_mode
+    model.paper_include_newsvendor_feature = include_newsvendor_feature
     return model
 
 
@@ -478,14 +500,18 @@ def _make_paper_residual_order_up_to_kan_model(
     source = metadata or config.get("monokan", {})
     history_length = int(source.get("history_length_H", config["history_length_H"]))
     history_feature_mode = str(source.get("paper_history_feature_mode", config.get("paper_history_feature_mode", "raw_lags")))
+    include_newsvendor_feature = bool(
+        source.get("paper_include_newsvendor_feature", config.get("paper_include_newsvendor_feature", False))
+    )
     history_features = paper_history_feature_count(history_length, history_feature_mode)
+    context_features = paper_context_feature_count(history_length, history_feature_mode, include_newsvendor_feature)
     resolved_monotonic_vars = (
-        _paper_context_monotonic_vars(history_features, history_feature_mode)
+        _paper_context_monotonic_vars(history_features, history_feature_mode, include_newsvendor_feature)
         if monotonic_vars == "context"
         else dict(monotonic_vars)
     )
     model = MonoKANPolicy(
-        input_dim=history_features + 4,
+        input_dim=context_features,
         hidden_layers=int(source.get("hidden_layers", config.get("monokan", {}).get("hidden_layers", 1))),
         hidden_units=int(source.get("hidden_units", config.get("monokan", {}).get("hidden_units", 16))),
         grid=int(source.get("grid", config.get("monokan", {}).get("grid", 5))),
@@ -511,10 +537,15 @@ def _make_paper_residual_order_up_to_kan_model(
     model.paper_residual_scale = float(source.get("residual_scale", 0.5))
     model.paper_residual_anchor = str(source.get("residual_anchor", "gamma"))
     model.paper_history_feature_mode = history_feature_mode
+    model.paper_include_newsvendor_feature = include_newsvendor_feature
     return model
 
 
-def _paper_context_monotonic_vars(history_length: int, history_feature_mode: str = "raw_lags") -> dict[int, int]:
+def _paper_context_monotonic_vars(
+    history_length: int,
+    history_feature_mode: str = "raw_lags",
+    include_newsvendor_feature: bool = False,
+) -> dict[int, int]:
     """Return structural directions for context-only target-stock prediction.
 
     Context features are historical demand followed by price, purchase cost,
@@ -534,6 +565,8 @@ def _paper_context_monotonic_vars(history_length: int, history_feature_mode: str
             int(history_length) + 3: 1,
         }
     )
+    if include_newsvendor_feature:
+        directions[int(history_length) + 4] = 1
     return directions
 
 

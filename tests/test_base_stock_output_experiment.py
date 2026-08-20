@@ -13,11 +13,15 @@ from inventory_control.base_stock_output_experiment import run_base_stock_output
 from inventory_control.policies.neural.fcnn import (
     build_paper_lost_sales_features,
     compute_paper_fcnn_feature_stats,
+    empirical_newsvendor_target_ratio_from_features,
     empirical_newsvendor_target_ratio,
     make_paper_base_stock_output_fcnn_model_for_products,
+    paper_context_feature_count,
     paper_history_feature_count,
 )
+from inventory_control.policies.neural.fcnn import make_paper_base_stock_output_fcnn_model
 from inventory_control.policies.neural.monokan import make_paper_base_stock_output_monokan_model_for_products
+from inventory_control.policies.neural.monokan import make_paper_base_stock_output_monokan_model
 from inventory_control.policies.neural.monokan import make_paper_base_stock_output_kan_model
 from inventory_control.policies.neural.registry import BASE_STOCK_OUTPUT_POLICY_NAMES, checkpoint_filenames
 from inventory_control.products import PaperLostSalesProductGenerator
@@ -128,6 +132,58 @@ def test_base_stock_summary_history_mode_reduces_kan_input_dimension() -> None:
     assert model(torch.zeros(1, 13)).item() == pytest.approx(1.5, abs=1e-5)
 
 
+def test_newsvendor_feature_initializes_direct_base_stock_outputs_per_product() -> None:
+    product = PaperLostSalesProductGenerator(_paper_config()).generate(1, "train")[0]
+    config = {
+        **_paper_config(),
+        "paper_history_feature_mode": "summary",
+        "paper_include_newsvendor_feature": True,
+        "fcnn": {
+            "hidden_layers": 1,
+            "hidden_units": 4,
+            "activation": "ELU",
+            "max_order_factor": 4.0,
+            "base_stock_logit_residual_scale": 0.03,
+        },
+        "monokan": {
+            "hidden_layers": 1,
+            "hidden_units": 4,
+            "grid": 3,
+            "max_order_factor": 4.0,
+            "base_stock_logit_residual_scale": 0.03,
+        },
+    }
+    features = build_paper_lost_sales_features(
+        inventory=0.0,
+        historical_demand=product.historical_demand,
+        price=product.price,
+        purchase_cost=product.purchase_cost,
+        holding_cost=product.holding_cost,
+        lost_sale_penalty=product.lost_sale_penalty,
+        history_feature_mode="summary",
+        include_newsvendor_feature=True,
+    )
+    expected = empirical_newsvendor_target_ratio_from_features(
+        product.historical_demand,
+        product.price,
+        product.purchase_cost,
+        product.holding_cost,
+        product.lost_sale_penalty,
+    )
+    context = torch.tensor([features[1:]], dtype=torch.float32)
+
+    assert paper_context_feature_count(32, "summary", include_newsvendor_feature=True) == 14
+    assert features[-1] == pytest.approx(expected)
+
+    for model in (
+        make_paper_base_stock_output_fcnn_model(config),
+        make_paper_base_stock_output_kan_model(config),
+        make_paper_base_stock_output_monokan_model(config),
+    ):
+        assert model.paper_include_newsvendor_feature is True
+        assert model(context).item() == pytest.approx(expected, abs=1e-5)
+
+
 def test_base_stock_output_experiment_writes_expected_artifacts(tmp_path) -> None:
     artifacts = run_base_stock_output_experiment(
         config_path="configs/paper_lost_sales_debug.yaml",
@@ -147,6 +203,7 @@ def test_base_stock_output_experiment_writes_expected_artifacts(tmp_path) -> Non
     }
     assert artifacts.metadata["imitation_pretraining"] is False
     assert artifacts.metadata["paper_history_feature_mode"] == "raw_lags"
+    assert artifacts.metadata["paper_include_newsvendor_feature"] is False
     assert "NN(z)->S_theta" in artifacts.metadata["action_parameterization"]
 
 
@@ -190,6 +247,7 @@ def test_base_stock_output_experiment_records_schema(tmp_path) -> None:
 def test_base_stock_output_experiment_supports_summary_history_mode(tmp_path) -> None:
     config = yaml.safe_load(Path("configs/paper_lost_sales_debug.yaml").read_text(encoding="utf-8"))
     config["paper_history_feature_mode"] = "summary"
+    config["paper_include_newsvendor_feature"] = True
     config["idp_benchmark"]["compact"] = {
         "training_products": 8,
         "validation_products": 4,
@@ -217,6 +275,7 @@ def test_base_stock_output_experiment_supports_summary_history_mode(tmp_path) ->
     )
 
     assert artifacts.metadata["paper_history_feature_mode"] == "summary"
+    assert artifacts.metadata["paper_include_newsvendor_feature"] is True
     assert set(artifacts.summary["policy_name"]) == {
         "KANBaseStockOrderUpTo",
         "MonoKANBaseStockOrderUpTo",

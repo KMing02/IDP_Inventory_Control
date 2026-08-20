@@ -88,6 +88,7 @@ def run_base_stock_output_experiment(
             normalize_reward_loss=settings["normalize_reward_loss"],
             training_demand_mode=settings["training_demand_mode"],
             history_feature_mode=settings["paper_history_feature_mode"],
+            include_newsvendor_feature=settings["paper_include_newsvendor_feature"],
             device=settings["device"],
         )
         target_diagnostic = _target_diagnostics(model, model_name, validation_products, feature_stats, settings)
@@ -118,6 +119,7 @@ def run_base_stock_output_experiment(
         "models": list(models),
         "action_parameterization": "NN(z)->S_theta, q=max(S_theta-inventory,0)",
         "paper_history_feature_mode": settings["paper_history_feature_mode"],
+        "paper_include_newsvendor_feature": settings["paper_include_newsvendor_feature"],
         "initialization": "final output initialized near empirical newsvendor target ratio",
         "imitation_pretraining": False,
     }
@@ -150,6 +152,9 @@ def _compact_settings(config: dict[str, Any]) -> dict[str, Any]:
         "device": benchmark.get("device"),
         "paper_history_feature_mode": str(
             benchmark.get("paper_history_feature_mode", config.get("paper_history_feature_mode", "raw_lags"))
+        ),
+        "paper_include_newsvendor_feature": bool(
+            benchmark.get("paper_include_newsvendor_feature", config.get("paper_include_newsvendor_feature", False))
         ),
     }
 
@@ -186,6 +191,7 @@ def _evaluate_model(
             feature_stats,
             settings["max_order_factor"],
             settings["paper_history_feature_mode"],
+            settings["paper_include_newsvendor_feature"],
         )
         rows.append(
             evaluate_paper_lost_sales_policy(
@@ -210,6 +216,7 @@ class _TorchBaseStockPolicyAdapter:
         feature_stats: PaperFCNNFeatureStats,
         max_order_factor: float,
         history_feature_mode: str = "raw_lags",
+        include_newsvendor_feature: bool = False,
     ) -> None:
         self.name = getattr(model, "name", "NeuralBaseStockOrderUpTo")
         self.model = model
@@ -217,6 +224,7 @@ class _TorchBaseStockPolicyAdapter:
         self.feature_stats = feature_stats
         self.max_order_factor = float(max_order_factor)
         self.history_feature_mode = history_feature_mode
+        self.include_newsvendor_feature = include_newsvendor_feature
 
     def act(self, inventory: float, t: int, rng=None) -> float:
         from inventory_control.policies.neural.fcnn import build_paper_lost_sales_features, infer_model_device
@@ -232,6 +240,7 @@ class _TorchBaseStockPolicyAdapter:
                     lost_sale_penalty=self.product.lost_sale_penalty,
                     feature_stats=self.feature_stats,
                     history_feature_mode=self.history_feature_mode,
+                    include_newsvendor_feature=self.include_newsvendor_feature,
                 )
             ],
             dtype=torch.float32,
@@ -288,6 +297,7 @@ def _target_diagnostics(
                     lost_sale_penalty=product.lost_sale_penalty,
                     feature_stats=feature_stats,
                     history_feature_mode=settings["paper_history_feature_mode"],
+                    include_newsvendor_feature=settings["paper_include_newsvendor_feature"],
                 )
             ],
             dtype=torch.float32,
