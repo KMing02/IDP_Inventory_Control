@@ -21,6 +21,7 @@ except ImportError as exc:  # pragma: no cover
 
 from inventory_control.policies.neural.fcnn import (
     PaperFCNNFeatureStats,
+    build_paper_lost_sales_features,
     empirical_newsvendor_target_ratio,
     infer_model_device,
     paper_context_feature_count,
@@ -276,9 +277,94 @@ class MonoKANPolicy(nn.Module):
         self.layers[-1].bias.add_(target_pre_activation - x.squeeze())
 
     @torch.no_grad()
+    def initialize_constant_output(self, target_value: float) -> None:
+        """Initialize a constant output without permanently disabling final splines.
+
+        Zero edge scales make the initial policy exactly context independent. The
+        spline coefficients remain initialized so scale gradients can open the
+        spline path on the first optimization step; zeroing both multiplicative
+        factors would leave that path permanently dead. Non-final edge scales
+        receive independent positive magnitudes (and the required sign for
+        decreasing inputs) so hidden units do not start as duplicate functions.
+        """
+        if target_value <= 0:
+            raise ValueError("target_value must be positive")
+        self._diversify_nonfinal_edge_scales()
+        final_layer = self.layers[-1]
+        final_layer.scale_base.zero_()
+        final_layer.scale_spline.zero_()
+        final_layer.bias.fill_(torch.log(torch.expm1(torch.tensor(float(target_value)))).item())
+        self.apply_monotonic_constraints()
+
+    @torch.no_grad()
+    def initialize_open_output(
+        self,
+        target_value: float,
+        reference_contexts: torch.Tensor | None = None,
+    ) -> None:
+        """Calibrate the output without cutting gradients to preceding layers."""
+        if target_value <= 0:
+            raise ValueError("target_value must be positive")
+        self._diversify_nonfinal_edge_scales()
+        final_layer = self.layers[-1]
+        nominal_scale = 1.0 / max(final_layer.in_dim, 1)
+        final_layer.scale_base.fill_(nominal_scale)
+        final_layer.scale_spline.fill_(nominal_scale)
+        final_layer.bias.zero_()
+        self.apply_monotonic_constraints()
+
+        if reference_contexts is None:
+            reference_contexts = torch.zeros(
+                1,
+                self.layers[0].in_dim,
+                dtype=final_layer.bias.dtype,
+                device=final_layer.bias.device,
+            )
+        else:
+            reference_contexts = reference_contexts.to(
+                dtype=final_layer.bias.dtype,
+                device=final_layer.bias.device,
+            )
+        pre_activation = reference_contexts
+        for layer in self.layers:
+            pre_activation = layer(pre_activation)
+        reference_pre_activation = torch.median(pre_activation.squeeze(-1))
+        target_pre_activation = torch.log(
+            torch.expm1(
+                torch.tensor(
+                    float(target_value),
+                    dtype=final_layer.bias.dtype,
+                    device=final_layer.bias.device,
+                )
+            )
+        )
+        final_layer.bias.add_(target_pre_activation - reference_pre_activation)
+
+    @torch.no_grad()
+    def _diversify_nonfinal_edge_scales(self) -> None:
+        """Break hidden-unit symmetry while preserving configured monotone signs."""
+        for layer in self.layers[:-1]:
+            nominal_scale = 1.0 / max(layer.in_dim, 1)
+            base_magnitude = nominal_scale * (0.5 + torch.rand_like(layer.scale_base))
+            spline_magnitude = nominal_scale * (0.5 + torch.rand_like(layer.scale_spline))
+            layer.scale_base.copy_(base_magnitude)
+            layer.scale_spline.copy_(spline_magnitude)
+
+        if not self.layers:
+            return
+        first_layer = self.layers[0]
+        first_scale_base = first_layer.scale_base.view(first_layer.out_dim, first_layer.in_dim)
+        first_scale_spline = first_layer.scale_spline.view(first_layer.out_dim, first_layer.in_dim)
+        for input_index, direction in self.monotonic_vars.items():
+            first_scale_base[:, input_index].copy_(
+                float(direction) * first_scale_base[:, input_index].abs()
+            )
+            first_scale_spline[:, input_index].abs_()
+
+    @torch.no_grad()
     def apply_monotonic_constraints(self) -> None:
         """Project layer parameters to the configured monotone feasible set."""
-        if not self.layers:
+        if not self.layers or not self.monotonic_vars:
             return
 
         first_layer = self.layers[0]
@@ -418,6 +504,156 @@ def make_paper_base_stock_output_monokan_model_for_products(
     source = dict(metadata or config.get("monokan", {}))
     source["initial_normalized_target"] = empirical_newsvendor_target_ratio(products, feature_stats=feature_stats)
     return make_paper_base_stock_output_monokan_model(config, metadata=source)
+
+
+def make_paper_direct_target_stock_kan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
+    """Build an unconstrained KAN that directly predicts a positive target-stock ratio."""
+    return _make_paper_direct_target_stock_kan_model(config, metadata=metadata, monotonic_vars={})
+
+
+def make_paper_direct_target_stock_monokan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
+    """Build a MonoKAN that directly predicts a positive context-monotone target-stock ratio."""
+    return _make_paper_direct_target_stock_kan_model(config, metadata=metadata, monotonic_vars="context")
+
+
+def make_paper_selective_direct_target_stock_kan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
+    """Build an unconstrained KAN with the explicit demand-level feature used by selective MonoKAN."""
+    return _make_paper_direct_target_stock_kan_model(config, metadata=metadata, monotonic_vars="selective_context")
+
+
+def make_paper_selective_direct_target_stock_monokan_model(
+    config: dict,
+    metadata: dict | None = None,
+) -> MonoKANPolicy:
+    """Constrain demand level and economics while leaving individual raw lags unconstrained."""
+    return _make_paper_direct_target_stock_kan_model(config, metadata=metadata, monotonic_vars="selective_context_monotone")
+
+
+def make_paper_selective_direct_target_stock_monokan_model_for_products(
+    config: dict,
+    products: Sequence[PaperLostSalesProduct],
+    feature_stats: PaperFCNNFeatureStats,
+    metadata: dict | None = None,
+) -> MonoKANPolicy:
+    """Calibrate selective MonoKAN's open readout on observable training contexts."""
+    source = dict(metadata or config.get("monokan", {}))
+    initial_target = empirical_newsvendor_target_ratio(products, feature_stats=feature_stats)
+    source["initial_normalized_target"] = initial_target
+    model = make_paper_selective_direct_target_stock_monokan_model(config, metadata=source)
+    contexts = torch.tensor(
+        [
+            build_paper_lost_sales_features(
+                inventory=0.0,
+                historical_demand=product.historical_demand,
+                price=product.price,
+                purchase_cost=product.purchase_cost,
+                holding_cost=product.holding_cost,
+                lost_sale_penalty=product.lost_sale_penalty,
+                feature_stats=feature_stats,
+                history_feature_mode=str(model.paper_history_feature_mode),
+                include_demand_level_feature=True,
+            )[1:]
+            for product in products
+        ],
+        dtype=torch.float32,
+    )
+    model.initialize_open_output(initial_target, reference_contexts=contexts)
+    model.paper_initialization_mode = "empirical_newsvendor_open_readout_selective_context"
+    return model
+
+
+def make_paper_direct_target_stock_monokan_model_for_products(
+    config: dict,
+    products: Sequence[PaperLostSalesProduct],
+    feature_stats: PaperFCNNFeatureStats,
+    metadata: dict | None = None,
+) -> MonoKANPolicy:
+    """Build direct-target MonoKAN calibrated on observable training contexts."""
+    source = dict(metadata or config.get("monokan", {}))
+    initial_target = empirical_newsvendor_target_ratio(products, feature_stats=feature_stats)
+    source["initial_normalized_target"] = initial_target
+    model = make_paper_direct_target_stock_monokan_model(config, metadata=source)
+    contexts = torch.tensor(
+        [
+            build_paper_lost_sales_features(
+                inventory=0.0,
+                historical_demand=product.historical_demand,
+                price=product.price,
+                purchase_cost=product.purchase_cost,
+                holding_cost=product.holding_cost,
+                lost_sale_penalty=product.lost_sale_penalty,
+                feature_stats=feature_stats,
+                history_feature_mode=str(model.paper_history_feature_mode),
+                include_newsvendor_feature=False,
+            )[1:]
+            for product in products
+        ],
+        dtype=torch.float32,
+    )
+    model.initialize_open_output(initial_target, reference_contexts=contexts)
+    model.paper_initialization_mode = "empirical_newsvendor_open_readout"
+    return model
+
+
+def _make_paper_direct_target_stock_kan_model(
+    config: dict,
+    monotonic_vars: dict[int, int] | str,
+    metadata: dict | None = None,
+) -> MonoKANPolicy:
+    """Build a pure direct target-stock KAN without a persistent heuristic anchor or output cap."""
+    source = metadata or config.get("monokan", {})
+    history_length = int(source.get("history_length_H", config["history_length_H"]))
+    history_feature_mode = str(
+        source.get("paper_history_feature_mode", config.get("paper_history_feature_mode", "raw_lags"))
+    )
+    history_features = paper_history_feature_count(history_length, history_feature_mode)
+    include_demand_level_feature = isinstance(monotonic_vars, str) and monotonic_vars in {
+        "selective_context",
+        "selective_context_monotone",
+    }
+    context_features = paper_context_feature_count(
+        history_length,
+        history_feature_mode,
+        include_demand_level_feature=include_demand_level_feature,
+    )
+    if monotonic_vars == "context":
+        resolved_monotonic_vars = _paper_context_monotonic_vars(history_features, history_feature_mode)
+    elif monotonic_vars == "selective_context_monotone":
+        resolved_monotonic_vars = _paper_selective_context_monotonic_vars(history_features)
+    elif monotonic_vars == "selective_context":
+        resolved_monotonic_vars = {}
+    else:
+        resolved_monotonic_vars = dict(monotonic_vars)
+    initial_target = float(source.get("initial_normalized_target", 1.0))
+    model = MonoKANPolicy(
+        input_dim=context_features,
+        hidden_layers=int(source.get("hidden_layers", config.get("monokan", {}).get("hidden_layers", 1))),
+        hidden_units=int(source.get("hidden_units", config.get("monokan", {}).get("hidden_units", 16))),
+        grid=int(source.get("grid", config.get("monokan", {}).get("grid", 5))),
+        grid_range=tuple(source.get("grid_range", config.get("monokan", {}).get("grid_range", [-2.0, 4.0]))),
+        noise_scale=float(source.get("noise_scale", config.get("monokan", {}).get("noise_scale", 0.01))),
+        base_scale_init=_optional_float(source.get("base_scale_init", config.get("monokan", {}).get("base_scale_init"))),
+        spline_scale_init=_optional_float(
+            source.get("spline_scale_init", config.get("monokan", {}).get("spline_scale_init"))
+        ),
+        monotonic_vars=resolved_monotonic_vars,
+        initial_normalized_order=initial_target,
+        output_upper_bound=None,
+    )
+    if resolved_monotonic_vars:
+        model.initialize_open_output(initial_target)
+        initialization_mode = "empirical_newsvendor_open_readout_zero_context"
+    else:
+        model.initialize_constant_output(initial_target)
+        initialization_mode = "global_empirical_newsvendor_median"
+    model.paper_action_parameterization = "order_up_to"
+    model.paper_scale_target_by_history_mean = True
+    model.paper_history_feature_mode = history_feature_mode
+    model.paper_include_newsvendor_feature = False
+    model.paper_include_demand_level_feature = include_demand_level_feature
+    model.paper_enforce_action_cap = False
+    model.paper_initialization_mode = initialization_mode
+    return model
 
 
 def _make_paper_base_stock_output_kan_model(
@@ -568,6 +804,18 @@ def _paper_context_monotonic_vars(
     if include_newsvendor_feature:
         directions[int(history_length) + 4] = 1
     return directions
+
+
+def _paper_selective_context_monotonic_vars(history_features: int) -> dict[int, int]:
+    """Constrain an explicit demand-level summary and economics, not individual demand lags."""
+    demand_level_index = int(history_features)
+    return {
+        demand_level_index: 1,
+        demand_level_index + 1: 1,
+        demand_level_index + 2: -1,
+        demand_level_index + 3: -1,
+        demand_level_index + 4: 1,
+    }
 
 
 def _optional_float(value) -> float | None:

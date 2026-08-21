@@ -68,9 +68,15 @@ def paper_context_feature_count(
     history_length: int,
     mode: str = "raw_lags",
     include_newsvendor_feature: bool = False,
+    include_demand_level_feature: bool = False,
 ) -> int:
     """Return context-feature dimensionality excluding current inventory."""
-    return paper_history_feature_count(history_length, mode) + 4 + int(include_newsvendor_feature)
+    return (
+        paper_history_feature_count(history_length, mode)
+        + 4
+        + int(include_newsvendor_feature)
+        + int(include_demand_level_feature)
+    )
 
 
 def build_paper_history_features(
@@ -220,6 +226,55 @@ class PaperCausalCNNPolicy(nn.Module):
         return torch.nn.functional.softplus(self.mlp(mlp_input)).squeeze(-1)
 
 
+class PaperContextCausalCNNPolicy(nn.Module):
+    """Causal history encoder that predicts a context-only target-stock ratio."""
+
+    def __init__(
+        self,
+        history_length: int,
+        hidden_layers: int = 2,
+        hidden_units: int = 32,
+        cnn_channels: int = 8,
+        cnn_dilations: Sequence[int] = (1, 2, 4, 8, 16),
+        activation: str = "ELU",
+    ) -> None:
+        super().__init__()
+        self.history_length = int(history_length)
+        blocks: list[nn.Module] = []
+        in_channels = 1
+        for dilation in cnn_dilations:
+            blocks.append(CausalConvBlock(in_channels, cnn_channels, int(dilation), activation=activation))
+            in_channels = cnn_channels
+        self.history_encoder = nn.Sequential(*blocks)
+
+        activation_cls = getattr(nn, activation)
+        mlp_layers: list[nn.Module] = []
+        previous_dim = cnn_channels + 4
+        for _ in range(hidden_layers):
+            mlp_layers.append(nn.Linear(previous_dim, hidden_units))
+            mlp_layers.append(activation_cls())
+            previous_dim = hidden_units
+        mlp_layers.append(nn.Linear(previous_dim, 1))
+        self.mlp = nn.Sequential(*mlp_layers)
+
+    def forward(self, context: torch.Tensor) -> torch.Tensor:
+        """Return a positive normalized target stock from raw history and economics."""
+        history = context[:, : self.history_length].unsqueeze(1)
+        economics = context[:, self.history_length :]
+        encoded_history = self.history_encoder(history)[:, :, -1]
+        return torch.nn.functional.softplus(self.mlp(torch.cat([encoded_history, economics], dim=1))).squeeze(-1)
+
+    @torch.no_grad()
+    def initialize_output_bias(self, target_value: float) -> None:
+        """Initialize the target head at a constant empirical newsvendor ratio."""
+        final_layer = self.mlp[-1]
+        if not isinstance(final_layer, nn.Linear):  # pragma: no cover
+            return
+        final_layer.weight.zero_()
+        target = max(float(target_value), 1e-6)
+        final_layer.bias.fill_(math.log(math.expm1(target)))
+
+
 class PaperContextMLPPolicy(nn.Module):
     """MLP over demand history and economics, excluding current inventory."""
 
@@ -362,6 +417,60 @@ def make_paper_base_stock_output_fcnn_model_for_products(
     return make_paper_base_stock_output_fcnn_model(config, metadata=source)
 
 
+def make_paper_direct_target_stock_fcnn_model(
+    config: dict,
+    metadata: dict | None = None,
+) -> nn.Module:
+    """Build an unbounded direct target-stock FCNN with no persistent heuristic anchor."""
+    defaults = config.get("fcnn", {})
+    source = metadata or defaults
+    history_length = int(source.get("history_length_H", config["history_length_H"]))
+    history_feature_mode = str(
+        source.get("paper_history_feature_mode", config.get("paper_history_feature_mode", "raw_lags"))
+    )
+    history_encoder = str(source.get("history_encoder", defaults.get("history_encoder", "flat")))
+    if history_encoder == "causal_cnn" and history_feature_mode == "raw_lags":
+        model = PaperContextCausalCNNPolicy(
+            history_length=history_length,
+            hidden_layers=int(source.get("hidden_layers", defaults.get("hidden_layers", 2))),
+            hidden_units=int(source.get("hidden_units", defaults.get("hidden_units", 32))),
+            cnn_channels=int(source.get("cnn_channels", defaults.get("cnn_channels", 8))),
+            cnn_dilations=tuple(source.get("cnn_dilations", defaults.get("cnn_dilations", [1, 2, 4, 8, 16]))),
+            activation=str(source.get("activation", defaults.get("activation", "ELU"))),
+        )
+    else:
+        context_features = paper_context_feature_count(history_length, history_feature_mode)
+        model = PaperContextMLPPolicy(
+            input_dim=context_features,
+            hidden_layers=int(source.get("hidden_layers", defaults.get("hidden_layers", 2))),
+            hidden_units=int(source.get("hidden_units", defaults.get("hidden_units", 32))),
+            activation=str(source.get("activation", defaults.get("activation", "ELU"))),
+            output="positive",
+            output_upper_bound=None,
+        )
+    model.paper_action_parameterization = "order_up_to"
+    model.paper_scale_target_by_history_mean = True
+    model.paper_history_feature_mode = history_feature_mode
+    model.paper_include_newsvendor_feature = False
+    model.paper_enforce_action_cap = False
+    model.paper_initialization_mode = "global_empirical_newsvendor_median"
+    model.paper_history_encoder = history_encoder
+    model.initialize_output_bias(float(source.get("initial_normalized_target", 1.0)))
+    return model
+
+
+def make_paper_direct_target_stock_fcnn_model_for_products(
+    config: dict,
+    products: Sequence[PaperLostSalesProduct],
+    feature_stats: PaperFCNNFeatureStats | None = None,
+    metadata: dict | None = None,
+) -> nn.Module:
+    """Initialize a direct target-stock FCNN from one training-set empirical ratio."""
+    source = dict(metadata or config.get("fcnn", {}))
+    source["initial_normalized_target"] = empirical_newsvendor_target_ratio(products, feature_stats=feature_stats)
+    return make_paper_direct_target_stock_fcnn_model(config, metadata=source)
+
+
 def make_paper_residual_order_up_to_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Module:
     """Build an FCNN that predicts a residual correction to historical base stock."""
     source = metadata or config["fcnn"]
@@ -396,6 +505,7 @@ def build_paper_lost_sales_features(
     feature_stats: PaperFCNNFeatureStats | None = None,
     history_feature_mode: str = "raw_lags",
     include_newsvendor_feature: bool = False,
+    include_demand_level_feature: bool = False,
 ) -> list[float]:
     """Build observable FCNN features without hidden Gamma parameters."""
     history = [float(value) for value in historical_demand]
@@ -405,13 +515,17 @@ def build_paper_lost_sales_features(
     else:
         demand_scale = feature_stats.demand_scale
         price_scale = feature_stats.price_scale
-    context = [
-        *build_paper_history_features(history, demand_scale, mode=history_feature_mode),
+    context = [*build_paper_history_features(history, demand_scale, mode=history_feature_mode)]
+    if include_demand_level_feature:
+        context.append(float(sum(history) / len(history)) / demand_scale)
+    context.extend(
+        [
         float(price) / price_scale,
         float(purchase_cost) / price_scale,
         float(holding_cost) / price_scale,
         float(lost_sale_penalty) / price_scale,
-    ]
+        ]
+    )
     if include_newsvendor_feature:
         context.append(
             empirical_newsvendor_target_ratio_from_features(

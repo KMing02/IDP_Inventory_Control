@@ -59,6 +59,34 @@ def test_training_batch_initial_inventory_uses_historical_mean_not_last_demand()
     assert batch["initial_inventory"].item() <= 2.0 * historical_mean
 
 
+def test_training_batch_can_use_last_historical_demand_for_initial_inventory() -> None:
+    product = PaperLostSalesProduct(
+        product_id="spiky_last_demand",
+        price=10.0,
+        purchase_cost=2.0,
+        holding_cost=1.0,
+        lost_sale_penalty=1.0,
+        true_mean_demand=10.0,
+        true_coefficient_of_variation=0.5,
+        gamma_shape=4.0,
+        gamma_scale=2.5,
+        demand_distribution_type="Gamma",
+        historical_demand=[1, 1, 1, 100],
+        initial_inventory=0,
+        future_demand=[1, 1, 1],
+    )
+
+    batch = make_paper_lost_sales_training_batch(
+        [product],
+        horizon=3,
+        generator=torch.Generator().manual_seed(0),
+        initial_inventory_mode="last_historical_demand",
+    )
+
+    expected = float(torch.rand((), generator=torch.Generator().manual_seed(0)).item()) * 200.0
+    assert batch["initial_inventory"].item() == pytest.approx(expected)
+
+
 def test_monokan_output_is_nonnegative() -> None:
     model = MonoKANPolicy(input_dim=37, hidden_layers=1, hidden_units=4, grid=3, monotonic_vars={0: -1})
     features = torch.randn(5, 37)

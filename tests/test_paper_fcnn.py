@@ -6,8 +6,10 @@ torch = pytest.importorskip("torch")
 from inventory_control.policies.neural.fcnn import (
     FCNNPolicy,
     PaperCausalCNNPolicy,
+    PaperContextCausalCNNPolicy,
     PaperFCNNPolicyAdapter,
     compute_paper_fcnn_feature_stats,
+    make_paper_direct_target_stock_fcnn_model,
 )
 from inventory_control.training.direct_backprop import (
     make_paper_lost_sales_training_batch,
@@ -69,6 +71,32 @@ def test_paper_causal_cnn_policy_output_is_nonnegative() -> None:
     assert torch.all(orders >= 0)
 
 
+def test_direct_target_stock_fcnn_uses_raw_history_causal_cnn_when_configured() -> None:
+    config = {
+        **_paper_config(),
+        "paper_history_feature_mode": "raw_lags",
+        "fcnn": {
+            "history_encoder": "causal_cnn",
+            "hidden_layers": 2,
+            "hidden_units": 32,
+            "activation": "ELU",
+            "cnn_channels": 4,
+            "cnn_dilations": [1, 2],
+        },
+    }
+
+    model = make_paper_direct_target_stock_fcnn_model(
+        config,
+        metadata={**config["fcnn"], "initial_normalized_target": 1.5},
+    )
+    target_factors = model(torch.randn(3, config["history_length_H"] + 4))
+
+    assert isinstance(model, PaperContextCausalCNNPolicy)
+    assert model.paper_action_parameterization == "order_up_to"
+    assert model.paper_history_encoder == "causal_cnn"
+    assert target_factors.tolist() == pytest.approx([1.5, 1.5, 1.5])
+
+
 def test_training_loss_is_negative_mean_total_reward() -> None:
     products = PaperLostSalesProductGenerator(_paper_config()).generate(4, "train")
     model = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
@@ -110,6 +138,41 @@ def test_paper_rollout_includes_terminal_salvage_by_default() -> None:
     without_salvage = paper_lost_sales_fcnn_rollout(model, batch, include_terminal_salvage=False)
 
     assert with_salvage.item() > without_salvage.item()
+
+
+def test_direct_target_stock_rollout_can_disable_implementation_cap() -> None:
+    class ConstantTarget(torch.nn.Module):
+        paper_action_parameterization = "order_up_to"
+        paper_scale_target_by_history_mean = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.target = torch.nn.Parameter(torch.tensor(10.0))
+
+        def forward(self, context: torch.Tensor) -> torch.Tensor:
+            return self.target.expand(context.shape[0])
+
+    product = PaperLostSalesProductGenerator(_paper_config()).generate(1, "train")[0]
+    product = product.__class__(**{**product.__dict__, "future_demand": [0], "initial_inventory": 0})
+    batch = make_paper_lost_sales_training_batch([product], horizon=1, generator=torch.Generator().manual_seed(0))
+    model = ConstantTarget()
+
+    capped = paper_lost_sales_fcnn_rollout(
+        model,
+        batch,
+        max_order_factor=4.0,
+        include_terminal_salvage=False,
+        enforce_action_cap=True,
+    )
+    uncapped = paper_lost_sales_fcnn_rollout(
+        model,
+        batch,
+        max_order_factor=4.0,
+        include_terminal_salvage=False,
+        enforce_action_cap=False,
+    )
+
+    assert uncapped.item() < capped.item()
 
 
 def test_training_batch_uses_stored_future_demand_trace() -> None:
