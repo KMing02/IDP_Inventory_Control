@@ -92,6 +92,35 @@ def test_supervised_target_diagnostic_is_deterministic(tmp_path: Path) -> None:
     pd.testing.assert_frame_equal(first.training_log, second.training_log)
 
 
+def test_supervised_target_diagnostic_is_model_order_independent(tmp_path: Path) -> None:
+    kwargs = {
+        "config_path": "configs/paper_lost_sales_debug.yaml",
+        "epochs": 2,
+        "validation_interval": 1,
+        "training_products": 6,
+        "validation_products": 3,
+        "batch_size": 3,
+        "seed": 29,
+    }
+    alone = run_supervised_target_diagnostic(
+        output_dir=tmp_path / "alone",
+        models=("KANDirectTargetStock",),
+        **kwargs,
+    )
+    with_comparator = run_supervised_target_diagnostic(
+        output_dir=tmp_path / "with-comparator",
+        models=("PaperFCNNDirectTargetStock", "KANDirectTargetStock"),
+        **kwargs,
+    )
+
+    expected = alone.predictions[alone.predictions["model"] == "KANDirectTargetStock"].reset_index(drop=True)
+    actual = with_comparator.predictions[
+        with_comparator.predictions["model"] == "KANDirectTargetStock"
+    ].reset_index(drop=True)
+    pd.testing.assert_frame_equal(expected, actual)
+    assert with_comparator.metadata["model_seeds"]["KANDirectTargetStock"] == 29
+
+
 def test_supervised_target_cli_smoke(tmp_path: Path) -> None:
     result = subprocess.run(
         [

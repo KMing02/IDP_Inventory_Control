@@ -24,6 +24,8 @@ from inventory_control.policies.neural.monokan import (
     make_paper_base_stock_output_monokan_model,
     make_paper_direct_target_stock_kan_model,
     make_paper_direct_target_stock_monokan_model,
+    make_paper_deep_grid7_direct_target_stock_kan_model,
+    make_paper_deep_grid7_direct_target_stock_monokan_model,
     make_paper_selective_direct_target_stock_kan_model,
     make_paper_selective_direct_target_stock_monokan_model,
     make_paper_monokan_model,
@@ -151,7 +153,23 @@ NEURAL_POLICY_SPECS: tuple[NeuralPolicySpec, ...] = (
         17,
         402,
     ),
-    NeuralPolicySpec("PenaltyMLP", make_paper_fcnn_model, "penalty_mlp.pt", "penalty", 18, 0),
+    NeuralPolicySpec(
+        "KANDirectTargetStockDeepGrid7",
+        make_paper_deep_grid7_direct_target_stock_kan_model,
+        "kan_direct_target_stock_deep_grid7.pt",
+        "kan",
+        18,
+        402,
+    ),
+    NeuralPolicySpec(
+        "MonoKANDirectTargetStockDeepGrid7",
+        make_paper_deep_grid7_direct_target_stock_monokan_model,
+        "monokan_direct_target_stock_deep_grid7.pt",
+        "monokan",
+        19,
+        402,
+    ),
+    NeuralPolicySpec("PenaltyMLP", make_paper_fcnn_model, "penalty_mlp.pt", "penalty", 20, 0),
 )
 
 POLICY_SPECS_BY_NAME = {spec.name: spec for spec in NEURAL_POLICY_SPECS}
@@ -175,6 +193,10 @@ DIRECT_TARGET_STOCK_POLICY_NAMES = (
 SELECTIVE_DIRECT_TARGET_STOCK_POLICY_NAMES = (
     "KANSelectiveDirectTargetStock",
     "MonoKANSelectiveDirectTargetStock",
+)
+CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES = (
+    "KANDirectTargetStockDeepGrid7",
+    "MonoKANDirectTargetStockDeepGrid7",
 )
 DEFAULT_STRUCTURE_POLICY_NAMES = frozenset(
     {

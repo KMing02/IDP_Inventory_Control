@@ -24,6 +24,9 @@ class PaperFCNNFeatureStats:
     price_scale: float
 
 
+PAPER_TEMPORAL_SUMMARY_FEATURE_COUNT = 5
+
+
 PAPER_HISTORY_SUMMARY_FEATURE_COUNT = 9
 
 
@@ -59,6 +62,8 @@ def paper_history_feature_count(history_length: int, mode: str = "raw_lags") -> 
     """Return the number of demand-history features for a preprocessing mode."""
     if mode == "raw_lags":
         return int(history_length)
+    if mode == "raw_lags_temporal":
+        return int(history_length) + PAPER_TEMPORAL_SUMMARY_FEATURE_COUNT
     if mode == "summary":
         return PAPER_HISTORY_SUMMARY_FEATURE_COUNT
     raise ValueError(f"unsupported paper history feature mode: {mode!r}")
@@ -87,8 +92,12 @@ def build_paper_history_features(
     """Build normalized demand-history features for paper-style policies."""
     history = torch.tensor([float(value) for value in historical_demand], dtype=torch.float32)
     scale = max(float(demand_scale), 1.0)
+    normalized = history / scale
     if mode == "raw_lags":
-        return [float(value) / scale for value in history.tolist()]
+        return normalized.tolist()
+    if mode == "raw_lags_temporal":
+        summaries = paper_temporal_summary_features(normalized)
+        return [*normalized.tolist(), *summaries.tolist()]
     if mode != "summary":
         raise ValueError(f"unsupported paper history feature mode: {mode!r}")
     if history.numel() == 0:
@@ -112,6 +121,38 @@ def build_paper_history_features(
         float(quantiles[1].item()) / scale,
         float(quantiles[2].item()) / scale,
     ]
+
+
+def paper_temporal_summary_features(history: torch.Tensor) -> torch.Tensor:
+    """Return causal demand summaries along the final tensor dimension.
+
+    Standard deviation uses the population convention. ``trend_8`` is the
+    least-squares slope against indices ``0, ..., 7`` (or the available shorter
+    suffix), in normalized demand units per period.
+    """
+    if history.shape[-1] == 0:
+        raise ValueError("temporal summaries require at least one history value")
+    window32 = history[..., -min(32, history.shape[-1]) :]
+    window8 = history[..., -min(8, history.shape[-1]) :]
+    window4 = history[..., -min(4, history.shape[-1]) :]
+    time = torch.arange(window8.shape[-1], dtype=history.dtype, device=history.device)
+    centered_time = time - time.mean()
+    denominator = torch.sum(centered_time.square())
+    trend = (
+        torch.sum((window8 - window8.mean(dim=-1, keepdim=True)) * centered_time, dim=-1) / denominator
+        if float(denominator.item()) > 0.0
+        else torch.zeros_like(window8[..., 0])
+    )
+    return torch.stack(
+        [
+            window32.mean(dim=-1),
+            window8.mean(dim=-1),
+            window4.mean(dim=-1),
+            window32.std(dim=-1, unbiased=False),
+            trend,
+        ],
+        dim=-1,
+    )
 
 
 def empirical_newsvendor_target_ratio_from_features(
@@ -355,7 +396,7 @@ def make_paper_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Modu
     activation = str(source.get("activation", config["fcnn"]["activation"]))
     history_encoder = str(source.get("history_encoder", config["fcnn"].get("history_encoder", "flat")))
     if history_encoder == "causal_cnn":
-        return PaperCausalCNNPolicy(
+        model = PaperCausalCNNPolicy(
             history_length=history_length,
             hidden_layers=hidden_layers,
             hidden_units=hidden_units,
@@ -363,12 +404,17 @@ def make_paper_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Modu
             cnn_dilations=tuple(source.get("cnn_dilations", config["fcnn"].get("cnn_dilations", [1, 2, 4, 8, 16]))),
             activation=activation,
         )
-    return FCNNPolicy(
-        input_dim=1 + history_length + 4,
-        hidden_layers=hidden_layers,
-        hidden_units=hidden_units,
-        activation=activation,
-    )
+    else:
+        model = FCNNPolicy(
+            input_dim=1 + history_length + 4,
+            hidden_layers=hidden_layers,
+            hidden_units=hidden_units,
+            activation=activation,
+        )
+    model.paper_action_parameterization = "raw"
+    model.paper_history_feature_mode = "raw_lags"
+    model.paper_roll_history = bool(source.get("roll_history", True))
+    return model
 
 
 def make_paper_order_up_to_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Module:
@@ -455,6 +501,7 @@ def make_paper_direct_target_stock_fcnn_model(
     model.paper_enforce_action_cap = False
     model.paper_initialization_mode = "global_empirical_newsvendor_median"
     model.paper_history_encoder = history_encoder
+    model.paper_roll_history = bool(source.get("roll_history", False))
     model.initialize_output_bias(float(source.get("initial_normalized_target", 1.0)))
     return model
 
@@ -557,6 +604,7 @@ class PaperFCNNPolicyAdapter:
         max_order_multiplier: float | None = None,
         history_feature_mode: str = "raw_lags",
         include_newsvendor_feature: bool = False,
+        enforce_action_cap: bool = True,
     ) -> None:
         self.model = model
         self.product = product
@@ -565,6 +613,13 @@ class PaperFCNNPolicyAdapter:
         self.scale_action_by_history_mean = scale_action_by_history_mean
         self.history_feature_mode = history_feature_mode
         self.include_newsvendor_feature = include_newsvendor_feature
+        self.enforce_action_cap = enforce_action_cap
+        self.initial_history = [float(value) for value in product.historical_demand]
+        self.history = list(self.initial_history)
+
+    def reset(self) -> None:
+        """Reset episode-local rolling demand state."""
+        self.history = list(self.initial_history)
 
     def act(self, inventory: float, t: int, rng=None) -> float:
         """Return non-negative continuous order quantity."""
@@ -572,7 +627,7 @@ class PaperFCNNPolicyAdapter:
             [
                 build_paper_lost_sales_features(
                     inventory=inventory,
-                    historical_demand=self.product.historical_demand,
+                    historical_demand=self.history,
                     price=self.product.price,
                     purchase_cost=self.product.purchase_cost,
                     holding_cost=self.product.holding_cost,
@@ -591,6 +646,13 @@ class PaperFCNNPolicyAdapter:
         historical_mean = max(sum(self.product.historical_demand) / len(self.product.historical_demand), 1.0)
         if self.scale_action_by_history_mean:
             order *= historical_mean
+        if not self.enforce_action_cap:
+            return order
         max_inventory_level = self.max_order_factor * historical_mean
         order_cap = max(max_inventory_level - float(inventory), 0.0)
         return min(order, order_cap)
+
+    def observe_demand(self, demand: float) -> None:
+        """Advance the rolling demand window after observing one period."""
+        if bool(getattr(self.model, "paper_roll_history", False)):
+            self.history = [*self.history[1:], float(demand)]

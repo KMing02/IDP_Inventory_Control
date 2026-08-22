@@ -60,8 +60,10 @@ def _evaluate_hermite_curves(x_eval: torch.Tensor, grid: torch.Tensor, coef: tor
         Tensor with shape ``(num_splines, batch)``.
     """
     num_grid_points = grid.shape[1]
-    mask = x_eval.unsqueeze(1) >= grid.unsqueeze(2)
-    idx = mask.sum(dim=1) - 1
+    # HermiteKANLayer constructs an evenly spaced grid for every edge. Arithmetic
+    # indexing avoids materializing a num_splines x grid_points x batch mask.
+    grid_step = torch.clamp((grid[:, -1] - grid[:, 0]) / (num_grid_points - 1), min=1e-8)
+    idx = torch.floor((x_eval - grid[:, [0]]) / grid_step[:, None]).to(torch.long)
     idx = idx.clamp(min=0, max=num_grid_points - 2)
     idx_right = idx + 1
 
@@ -479,6 +481,49 @@ def make_paper_monokan_model(config: dict, metadata: dict | None = None) -> Mono
     )
 
 
+def paper_raw_action_monotonic_vars(history_length: int) -> dict[int, int]:
+    """Return hard directions for canonical raw paper-policy features."""
+    history_length = int(history_length)
+    return {
+        0: -1,
+        **{index: 1 for index in range(1, history_length + 1)},
+        history_length + 1: 1,
+        history_length + 2: -1,
+        history_length + 3: -1,
+        history_length + 4: 1,
+    }
+
+
+def make_paper_deep_grid7_raw_action_monokan_model(
+    config: dict,
+    metadata: dict | None = None,
+) -> MonoKANPolicy:
+    """Build the frozen 37->16->16->1 raw-action DeepGrid7 MonoKAN."""
+    defaults = config.get("monokan", {})
+    source = metadata or defaults
+    history_length = int(source.get("history_length_H", config["history_length_H"]))
+    model = MonoKANPolicy(
+        input_dim=1 + history_length + 4,
+        hidden_layers=2,
+        hidden_units=16,
+        grid=7,
+        grid_range=tuple(source.get("grid_range", defaults.get("grid_range", [-2.0, 4.0]))),
+        noise_scale=float(source.get("noise_scale", defaults.get("noise_scale", 0.01))),
+        base_scale_init=_optional_float(source.get("base_scale_init", defaults.get("base_scale_init"))),
+        spline_scale_init=_optional_float(source.get("spline_scale_init", defaults.get("spline_scale_init"))),
+        monotonic_vars=paper_raw_action_monotonic_vars(history_length),
+        initial_normalized_order=float(source.get("initial_normalized_order", 0.5)),
+        output_upper_bound=None,
+    )
+    model.paper_action_parameterization = "raw"
+    model.paper_history_feature_mode = "raw_lags"
+    model.paper_roll_history = True
+    model.paper_enforce_action_cap = False
+    model.paper_scale_action_by_history_mean = False
+    model.paper_architecture = "raw_action_deepgrid7"
+    return model
+
+
 def make_paper_order_up_to_monokan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
     """Build a MonoKAN model that predicts a normalized order-up-to target."""
     return _make_paper_base_stock_output_kan_model(config, metadata=metadata, monotonic_vars={}, use_logit_residual=False)
@@ -514,6 +559,26 @@ def make_paper_direct_target_stock_kan_model(config: dict, metadata: dict | None
 def make_paper_direct_target_stock_monokan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
     """Build a MonoKAN that directly predicts a positive context-monotone target-stock ratio."""
     return _make_paper_direct_target_stock_kan_model(config, metadata=metadata, monotonic_vars="context")
+
+
+def make_paper_deep_grid7_direct_target_stock_kan_model(
+    config: dict,
+    metadata: dict | None = None,
+) -> MonoKANPolicy:
+    """Build the fixed 2x16, grid-7 KAN used by the capacity diagnostic."""
+    source = dict(metadata or config.get("monokan", {}))
+    source.update({"hidden_layers": 2, "hidden_units": 16, "grid": 7})
+    return make_paper_direct_target_stock_kan_model(config, metadata=source)
+
+
+def make_paper_deep_grid7_direct_target_stock_monokan_model(
+    config: dict,
+    metadata: dict | None = None,
+) -> MonoKANPolicy:
+    """Build the fixed 2x16, grid-7 MonoKAN used by the capacity diagnostic."""
+    source = dict(metadata or config.get("monokan", {}))
+    source.update({"hidden_layers": 2, "hidden_units": 16, "grid": 7})
+    return make_paper_direct_target_stock_monokan_model(config, metadata=source)
 
 
 def make_paper_selective_direct_target_stock_kan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
@@ -595,6 +660,23 @@ def make_paper_direct_target_stock_monokan_model_for_products(
     return model
 
 
+def make_paper_deep_grid7_direct_target_stock_monokan_model_for_products(
+    config: dict,
+    products: Sequence[PaperLostSalesProduct],
+    feature_stats: PaperFCNNFeatureStats,
+    metadata: dict | None = None,
+) -> MonoKANPolicy:
+    """Calibrate the fixed DeepGrid7 MonoKAN on observable training contexts."""
+    source = dict(metadata or config.get("monokan", {}))
+    source.update({"hidden_layers": 2, "hidden_units": 16, "grid": 7})
+    return make_paper_direct_target_stock_monokan_model_for_products(
+        config,
+        products,
+        feature_stats,
+        metadata=source,
+    )
+
+
 def _make_paper_direct_target_stock_kan_model(
     config: dict,
     monotonic_vars: dict[int, int] | str,
@@ -653,6 +735,7 @@ def _make_paper_direct_target_stock_kan_model(
     model.paper_include_demand_level_feature = include_demand_level_feature
     model.paper_enforce_action_cap = False
     model.paper_initialization_mode = initialization_mode
+    model.paper_roll_history = bool(source.get("roll_history", False))
     return model
 
 
@@ -791,6 +874,10 @@ def _paper_context_monotonic_vars(
     """
     if history_feature_mode == "summary":
         directions = {index: 1 for index in (0, 3, 4, 6, 7, 8)}
+    elif history_feature_mode == "raw_lags_temporal":
+        raw_history_length = int(history_length) - 5
+        directions = {index: 1 for index in range(raw_history_length)}
+        directions.update({raw_history_length + index: 1 for index in range(3)})
     else:
         directions = {index: 1 for index in range(int(history_length))}
     directions.update(

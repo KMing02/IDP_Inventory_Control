@@ -66,6 +66,7 @@ from inventory_control.training.direct_backprop import (
     paper_lost_sales_context_features,
     paper_lost_sales_raw_order,
     paper_lost_sales_target_level,
+    paper_rolling_target_levels,
     train_paper_lost_sales_policy,
 )
 
@@ -114,6 +115,7 @@ class _TorchPaperPolicyAdapter:
         feature_stats: PaperFCNNFeatureStats,
         max_order_factor: float,
         scale_action_by_history_mean: bool,
+        enforce_action_cap: bool = True,
     ) -> None:
         self.name = name
         self.model = model
@@ -121,6 +123,13 @@ class _TorchPaperPolicyAdapter:
         self.feature_stats = feature_stats
         self.max_order_factor = max_order_factor
         self.scale_action_by_history_mean = scale_action_by_history_mean
+        self.enforce_action_cap = enforce_action_cap
+        self.initial_history = [float(value) for value in product.historical_demand]
+        self.history = list(self.initial_history)
+
+    def reset(self) -> None:
+        """Reset episode-local rolling demand state."""
+        self.history = list(self.initial_history)
 
     def act(self, inventory: float, t: int, rng=None) -> float:
         """Return the deployed, state-capped order quantity."""
@@ -131,9 +140,16 @@ class _TorchPaperPolicyAdapter:
             np.asarray([inventory], dtype=float),
             self.max_order_factor,
             self.scale_action_by_history_mean,
+            historical_demand=self.history,
+            enforce_action_cap=self.enforce_action_cap,
         )
         del raw
         return float(deployed[0])
+
+    def observe_demand(self, demand: float) -> None:
+        """Advance raw paper policies with the newly observed demand."""
+        if bool(getattr(self.model, "paper_roll_history", False)):
+            self.history = [*self.history[1:], float(demand)]
 
 
 def _profile_settings(config: dict[str, Any], profile: str) -> dict[str, Any]:
@@ -199,10 +215,13 @@ def _model_orders(
     inventories: np.ndarray,
     max_order_factor: float,
     scale_action_by_history_mean: bool,
+    historical_demand: list[float] | None = None,
+    enforce_action_cap: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     device = infer_model_device(model)
+    observed_history = historical_demand or product.historical_demand
     history = torch.tensor(
-        [[float(value) / feature_stats.demand_scale for value in product.historical_demand] for _ in inventories],
+        [[float(value) / feature_stats.demand_scale for value in observed_history] for _ in inventories],
         dtype=torch.float32,
         device=device,
     )
@@ -234,7 +253,7 @@ def _model_orders(
         )
         raw = raw.detach().cpu().numpy().astype(float)
     cap = np.maximum(float(max_order_factor) * historical_mean - inventories, 0.0)
-    return raw, np.minimum(raw, cap)
+    return raw, np.minimum(raw, cap) if enforce_action_cap else raw.copy()
 
 
 def _batched_torch_policy_metrics(
@@ -317,23 +336,38 @@ def _batched_torch_policy_metrics(
     model.eval()
     with torch.no_grad():
         parameterization = getattr(model, "paper_action_parameterization", "raw")
+        roll_history = bool(getattr(model, "paper_roll_history", False))
+        rollout_batch = dict(batch) if roll_history else batch
+        uses_target_level = parameterization in {"order_up_to", "residual_order_up_to"}
+        rolling_target_levels = (
+            paper_rolling_target_levels(model, batch, demand_paths)
+            if uses_target_level and roll_history
+            else None
+        )
         target_level = (
-            paper_lost_sales_target_level(model, batch)
-            if parameterization in {"order_up_to", "residual_order_up_to"}
+            paper_lost_sales_target_level(model, rollout_batch)
+            if uses_target_level and not roll_history
             else None
         )
         for t in range(horizon):
-            if target_level is None:
+            if uses_target_level:
+                current_target_level = (
+                    rolling_target_levels[:, t] if rolling_target_levels is not None else target_level
+                )
+                assert current_target_level is not None
+                raw_order = torch.relu(current_target_level - inventory)
+            else:
                 raw_order = paper_lost_sales_raw_order(
                     model,
-                    batch,
+                    rollout_batch,
                     inventory,
                     scale_action_by_history_mean=bool(settings["scale_action_by_history_mean"]),
                 )
+            if bool(settings.get("enforce_action_cap", True)):
+                order_cap = torch.relu(max_inventory_level - inventory)
+                order = torch.minimum(raw_order, order_cap)
             else:
-                raw_order = torch.relu(target_level - inventory)
-            order_cap = torch.relu(max_inventory_level - inventory)
-            order = torch.minimum(raw_order, order_cap)
+                order = raw_order
             demand = demand_paths[:, t]
             available = inventory + order
             sales = torch.minimum(demand, available)
@@ -358,6 +392,12 @@ def _batched_torch_policy_metrics(
                 total_lost_penalty += lost_penalty
                 total_holding += holding
             inventory = ending_inventory
+            if roll_history and not uses_target_level:
+                observed = demand / torch.clamp(batch["feature_demand_scale"], min=1.0)
+                rollout_batch["history"] = torch.cat(
+                    [rollout_batch["history"][:, 1:], observed.unsqueeze(1)],
+                    dim=1,
+                )
 
     rows = []
     values = {
@@ -461,6 +501,8 @@ def _train_model(
         training_demand_mode=str(settings.get("training_demand_mode", "fixed_future")),
         residual_anchor=str(settings.get("residual_anchor", "gamma")),
         include_terminal_salvage=bool(settings.get("include_terminal_salvage", False)),
+        initial_inventory_mode=str(settings.get("initial_inventory_mode", "historical_mean")),
+        enforce_action_cap=bool(settings.get("enforce_action_cap", True)),
         clip_imitation_predictions=clip_imitation_predictions,
     )
     if result.best_state_dict is not None:
@@ -860,7 +902,11 @@ def run_idp_benchmark(
     generator = PaperLostSalesProductGenerator(config)
     train_products = generator.generate(int(settings["training_products"]), split="train")
     evaluation_products = generator.generate(int(settings["validation_products"]), split=split)
-    feature_stats = compute_paper_fcnn_feature_stats(train_products)
+    feature_stats = (
+        compute_paper_fcnn_feature_stats(train_products)
+        if bool(settings.get("normalize_observations", True))
+        else PaperFCNNFeatureStats(demand_scale=1.0, price_scale=1.0)
+    )
 
     oracle_levels = _oracle_levels(
         evaluation_products,

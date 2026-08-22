@@ -104,6 +104,9 @@ def evaluate_paper_lost_sales_policy(
     total_holding_cost = 0.0
     counted_periods = 0
     for _ in range(n_episodes):
+        reset_policy = getattr(policy, "reset", None)
+        if reset_policy is not None:
+            reset_policy()
         inventory = float(product.initial_inventory)
         episode_reward = 0.0
         demands = _paper_evaluation_demand_path(product, horizon, rng)
@@ -118,6 +121,9 @@ def evaluate_paper_lost_sales_policy(
                 product.holding_cost,
                 product.lost_sale_penalty,
             )
+            observe_demand = getattr(policy, "observe_demand", None)
+            if observe_demand is not None:
+                observe_demand(float(demand))
             if t >= burn_in:
                 episode_reward += reward
                 total_sales += info["sales"]

@@ -18,7 +18,11 @@ from inventory_control.idp_benchmark import (
 )
 from inventory_control.paper_evaluation import paper_evaluation_seed_start
 from inventory_control.paper_lost_sales import evaluate_paper_lost_sales_policy
-from inventory_control.policies.neural.fcnn import compute_paper_fcnn_feature_stats, make_paper_fcnn_model
+from inventory_control.policies.neural.fcnn import (
+    PaperFCNNFeatureStats,
+    compute_paper_fcnn_feature_stats,
+    make_paper_fcnn_model,
+)
 from inventory_control.paper_configs import load_paper_lost_sales_config
 from inventory_control.products import PaperLostSalesProductGenerator
 from inventory_control.training.direct_backprop import DirectBackpropResult
@@ -137,10 +141,56 @@ def test_batched_torch_policy_metrics_match_scalar_adapter() -> None:
     assert batched["mean_total_reward"].tolist() == pytest.approx(scalar_rewards)
 
 
+def test_batched_raw_fcnn_evaluation_rolls_history_after_observed_demand() -> None:
+    class RecordingRawPolicy(torch.nn.Module):
+        paper_action_parameterization = "raw"
+        paper_roll_history = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.bias = torch.nn.Parameter(torch.tensor(0.0))
+            self.inputs: list[torch.Tensor] = []
+
+        def forward(self, features: torch.Tensor) -> torch.Tensor:
+            self.inputs.append(features.detach().cpu().clone())
+            return self.bias.expand(features.shape[0])
+
+    config = load_paper_lost_sales_config("configs/paper_lost_sales_debug.yaml")
+    settings = {**config["idp_benchmark"], **config["idp_benchmark"]["compact"]}
+    settings.update({"evaluation_horizon": 2, "burn_in": 0, "enforce_action_cap": False})
+    product = PaperLostSalesProductGenerator(config).generate(1, split="validation")[0]
+    product = product.__class__(
+        **{
+            **product.__dict__,
+            "historical_demand": [float(index) for index in range(32)],
+            "future_demand": [40, 99],
+            "initial_inventory": 50,
+        }
+    )
+    model = RecordingRawPolicy()
+
+    _batched_torch_policy_metrics(
+        [product],
+        model,
+        PaperFCNNFeatureStats(demand_scale=1.0, price_scale=1.0),
+        settings,
+        split="validation",
+    )
+
+    assert len(model.inputs) == 2
+    assert model.inputs[0][0, 1:33].tolist() == pytest.approx([float(index) for index in range(32)])
+    assert model.inputs[1][0, 1:33].tolist() == pytest.approx(
+        [float(index) for index in range(1, 32)] + [40.0]
+    )
+    assert 99.0 not in model.inputs[1][0].tolist()
+
+
 def test_benchmark_training_disables_terminal_salvage_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     config = load_paper_lost_sales_config("configs/paper_lost_sales_debug.yaml")
     settings = {**config["idp_benchmark"], **config["idp_benchmark"]["compact"]}
     settings["learning_rate"] = 5e-4
+    settings["initial_inventory_mode"] = "last_historical_demand"
+    settings["enforce_action_cap"] = False
     products = PaperLostSalesProductGenerator(config).generate(2, split="train")
     feature_stats = compute_paper_fcnn_feature_stats(products)
     model = make_paper_fcnn_model(config)
@@ -166,6 +216,8 @@ def test_benchmark_training_disables_terminal_salvage_by_default(monkeypatch: py
 
     assert captured["include_terminal_salvage"] is False
     assert captured["learning_rate"] == 5e-4
+    assert captured["initial_inventory_mode"] == "last_historical_demand"
+    assert captured["enforce_action_cap"] is False
 
 
 def test_idp_test_split_requires_explicit_confirmation(tmp_path: Path) -> None:

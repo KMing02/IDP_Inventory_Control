@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -17,6 +18,7 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError("Install neural dependencies with `python -m pip install -e '.[dev]'`.") from exc
 
 from inventory_control.paper_configs import load_paper_lost_sales_config
+from inventory_control.paper_evaluation import paper_evaluation_seed_start
 from inventory_control.paper_lost_sales import (
     evaluate_paper_lost_sales_policy,
     historical_demand_base_stock_policy,
@@ -36,12 +38,15 @@ from inventory_control.policies.neural.monokan import (
     make_paper_base_stock_output_kan_model,
     make_paper_direct_target_stock_kan_model,
     make_paper_direct_target_stock_monokan_model_for_products,
+    make_paper_deep_grid7_direct_target_stock_kan_model,
+    make_paper_deep_grid7_direct_target_stock_monokan_model_for_products,
     make_paper_selective_direct_target_stock_kan_model,
     make_paper_selective_direct_target_stock_monokan_model,
     make_paper_selective_direct_target_stock_monokan_model_for_products,
 )
 from inventory_control.policies.neural.registry import (
     BASE_STOCK_OUTPUT_POLICY_NAMES,
+    CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES,
     DIRECT_TARGET_STOCK_POLICY_NAMES,
     POLICY_SPECS_BY_NAME,
     SELECTIVE_DIRECT_TARGET_STOCK_POLICY_NAMES,
@@ -68,12 +73,15 @@ def run_base_stock_output_experiment(
     models: tuple[str, ...] = BASE_STOCK_OUTPUT_POLICY_NAMES,
     device: str | None = None,
     seed: int | None = None,
+    activation_checkpointing: bool = True,
+    shared_training_seed: bool = False,
 ) -> BaseStockOutputArtifacts:
     """Run a no-imitation direct base-stock-output comparison."""
     supported_models = (
         set(BASE_STOCK_OUTPUT_POLICY_NAMES)
         | set(DIRECT_TARGET_STOCK_POLICY_NAMES)
         | set(SELECTIVE_DIRECT_TARGET_STOCK_POLICY_NAMES)
+        | set(CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES)
     )
     unknown = sorted(set(models) - supported_models)
     if unknown:
@@ -90,13 +98,18 @@ def run_base_stock_output_experiment(
     generator = PaperLostSalesProductGenerator(config)
     train_products = generator.generate(settings["training_products"], split="train")
     validation_products = generator.generate(settings["validation_products"], split="validation")
-    feature_stats = compute_paper_fcnn_feature_stats(train_products)
+    feature_stats = (
+        compute_paper_fcnn_feature_stats(train_products)
+        if settings["normalize_observations"]
+        else PaperFCNNFeatureStats(demand_scale=1.0, price_scale=1.0)
+    )
     initial_target_ratio = empirical_newsvendor_target_ratio(train_products, feature_stats)
 
     summary_rows: list[dict[str, Any]] = []
     log_frames: list[pd.DataFrame] = []
     target_frames: list[pd.DataFrame] = []
     product_frames: list[pd.DataFrame] = []
+    rolling_history_by_model: dict[str, bool] = {}
     for model_name in models:
         spec = POLICY_SPECS_BY_NAME[model_name]
         model_seed = settings["seed"] + spec.seed_offset
@@ -105,6 +118,9 @@ def run_base_stock_output_experiment(
         include_newsvendor_feature = bool(getattr(model, "paper_include_newsvendor_feature", False))
         enforce_action_cap = bool(getattr(model, "paper_enforce_action_cap", True))
         include_demand_level_feature = bool(getattr(model, "paper_include_demand_level_feature", False))
+        rolling_history = bool(getattr(model, "paper_roll_history", False))
+        rolling_history_by_model[model_name] = rolling_history
+        training_seed = settings["seed"] if shared_training_seed else model_seed
         result = train_paper_lost_sales_fcnn(
             train_products,
             model,
@@ -112,7 +128,7 @@ def run_base_stock_output_experiment(
             batch_size=min(settings["batch_size"], len(train_products)),
             epochs=settings["reward_epochs"],
             learning_rate=settings["learning_rate"],
-            seed=model_seed,
+            seed=training_seed,
             imitation_epochs=0,
             validation_products=validation_products,
             validation_interval=settings["validation_interval"],
@@ -126,8 +142,12 @@ def run_base_stock_output_experiment(
             include_terminal_salvage=settings["include_terminal_salvage"],
             initial_inventory_mode=settings["initial_inventory_mode"],
             enforce_action_cap=enforce_action_cap,
+            checkpoint_rolling_target=activation_checkpointing,
             device=settings["device"],
         )
+        final_state = copy.deepcopy(model.state_dict())
+        final_checkpoint_filename = f"{Path(spec.checkpoint_filename).stem}_final.pt"
+        torch.save(final_state, destination / final_checkpoint_filename)
         selected_checkpoint_epoch = _restore_best_validation_state(model, result)
         torch.save(model.state_dict(), destination / spec.checkpoint_filename)
         target_diagnostic = _target_diagnostics(model, model_name, validation_products, feature_stats, settings)
@@ -150,9 +170,14 @@ def run_base_stock_output_experiment(
                 "parameter_count": _parameter_count(model),
                 "training_seconds": result.elapsed_seconds,
                 "checkpoint_filename": spec.checkpoint_filename,
+                "final_checkpoint_filename": final_checkpoint_filename,
                 "selected_checkpoint_epoch": selected_checkpoint_epoch,
+                "final_checkpoint_epoch": settings["reward_epochs"],
+                "model_seed": model_seed,
+                "training_seed": training_seed,
                 "action_cap_enforced": enforce_action_cap,
                 "persistent_newsvendor_anchor": include_newsvendor_feature,
+                "rolling_history": rolling_history,
             }
         )
         log_frames.append(_training_log_frame(result, model_name))
@@ -183,9 +208,14 @@ def run_base_stock_output_experiment(
         "paper_include_newsvendor_feature": settings["paper_include_newsvendor_feature"],
         "include_terminal_salvage": settings["include_terminal_salvage"],
         "initial_inventory_mode": settings["initial_inventory_mode"],
+        "normalize_observations": settings["normalize_observations"],
+        "rolling_history": rolling_history_by_model,
         "initialization": "final output initialized near empirical newsvendor target ratio",
         "imitation_pretraining": False,
+        "activation_checkpointing": bool(activation_checkpointing),
+        "shared_training_seed": bool(shared_training_seed),
         "pure_direct_target_stock_models": list(DIRECT_TARGET_STOCK_POLICY_NAMES),
+        "capacity_comparison_models": list(CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES),
     }
 
     summary.to_csv(destination / "summary.csv", index=False)
@@ -217,6 +247,7 @@ def _compact_settings(config: dict[str, Any]) -> dict[str, Any]:
         ),
         "training_demand_mode": str(benchmark.get("training_demand_mode", "fixed_future")),
         "initial_inventory_mode": str(benchmark.get("initial_inventory_mode", "historical_mean")),
+        "normalize_observations": bool(benchmark.get("normalize_observations", True)),
         "learning_rate": float(config.get("learning_rate", 1e-3)),
         "device": benchmark.get("device"),
         "paper_history_feature_mode": str(
@@ -271,6 +302,17 @@ def _make_model(
             feature_stats,
             metadata=metadata,
         )
+    if name in CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES:
+        metadata = dict(config.get("monokan", {}))
+        metadata["initial_normalized_target"] = initial_target_ratio
+        if name == "KANDirectTargetStockDeepGrid7":
+            return make_paper_deep_grid7_direct_target_stock_kan_model(config, metadata=metadata)
+        return make_paper_deep_grid7_direct_target_stock_monokan_model_for_products(
+            config,
+            train_products,
+            feature_stats,
+            metadata=metadata,
+        )
     raise ValueError(f"unknown direct base-stock model: {name}")
 
 
@@ -282,36 +324,62 @@ def _evaluate_model(
     feature_stats: PaperFCNNFeatureStats,
     settings: dict[str, Any],
 ) -> pd.DataFrame:
-    rows = []
-    for index, product in enumerate(products):
-        policy = _TorchBaseStockPolicyAdapter(
-            model,
-            product,
-            feature_stats,
-            settings["max_order_factor"],
-            settings["paper_history_feature_mode"],
-            bool(getattr(model, "paper_include_newsvendor_feature", False)),
-            bool(getattr(model, "paper_enforce_action_cap", True)),
-            bool(getattr(model, "paper_include_demand_level_feature", False)),
-        )
-        metrics = evaluate_paper_lost_sales_policy(
-                product,
-                policy,
-                horizon=settings["evaluation_horizon"],
-                n_episodes=1,
-                seed=settings["seed"] + 10_000 + index,
-                burn_in=settings["burn_in"],
-            )
-        rows.append(
+    use_batched_evaluation = bool(
+        settings["paper_history_feature_mode"] in {"raw_lags", "raw_lags_temporal"}
+        and not getattr(model, "paper_include_newsvendor_feature", False)
+        and not getattr(model, "paper_include_demand_level_feature", False)
+    )
+    if use_batched_evaluation:
+        from inventory_control.idp_benchmark import _batched_torch_policy_metrics
+
+        batch_settings = {
+            **settings,
+            "scale_action_by_history_mean": False,
+            "enforce_action_cap": bool(getattr(model, "paper_enforce_action_cap", True)),
+        }
+        metrics = _batched_torch_policy_metrics(products, model, feature_stats, batch_settings, "validation")
+        rows = [
             _product_metric_row(
-                metrics,
+                metrics.iloc[index].to_dict(),
                 model_name,
                 product,
                 settings,
                 index,
                 model_seed=model_seed,
             )
-        )
+            for index, product in enumerate(products)
+        ]
+    else:
+        rows = []
+        for index, product in enumerate(products):
+            policy = _TorchBaseStockPolicyAdapter(
+                model,
+                product,
+                feature_stats,
+                settings["max_order_factor"],
+                settings["paper_history_feature_mode"],
+                bool(getattr(model, "paper_include_newsvendor_feature", False)),
+                bool(getattr(model, "paper_enforce_action_cap", True)),
+                bool(getattr(model, "paper_include_demand_level_feature", False)),
+            )
+            metrics = evaluate_paper_lost_sales_policy(
+                product,
+                policy,
+                horizon=settings["evaluation_horizon"],
+                n_episodes=1,
+                seed=paper_evaluation_seed_start("validation") + index,
+                burn_in=settings["burn_in"],
+            )
+            rows.append(
+                _product_metric_row(
+                    metrics,
+                    model_name,
+                    product,
+                    settings,
+                    index,
+                    model_seed=model_seed,
+                )
+            )
     return pd.DataFrame(rows)
 
 
@@ -338,6 +406,14 @@ class _TorchBaseStockPolicyAdapter:
         self.include_newsvendor_feature = include_newsvendor_feature
         self.enforce_action_cap = bool(enforce_action_cap)
         self.include_demand_level_feature = bool(include_demand_level_feature)
+        self.initial_history = [float(value) for value in product.historical_demand]
+        self.history = list(self.initial_history)
+        self.roll_history = bool(getattr(model, "paper_roll_history", False))
+        self.target_stock = self._predict_target_stock()
+
+    def reset(self) -> None:
+        """Reset episode-local demand history and initial target stock."""
+        self.history = list(self.initial_history)
         self.target_stock = self._predict_target_stock()
 
     def _predict_target_stock(self) -> float:
@@ -347,7 +423,7 @@ class _TorchBaseStockPolicyAdapter:
             [
                 build_paper_lost_sales_features(
                     inventory=0.0,
-                    historical_demand=self.product.historical_demand,
+                    historical_demand=self.history,
                     price=self.product.price,
                     purchase_cost=self.product.purchase_cost,
                     holding_cost=self.product.holding_cost,
@@ -368,12 +444,19 @@ class _TorchBaseStockPolicyAdapter:
         return target_factor * historical_mean
 
     def act(self, inventory: float, t: int, rng=None) -> float:
+        if self.roll_history:
+            self.target_stock = self._predict_target_stock()
         historical_mean = max(sum(self.product.historical_demand) / len(self.product.historical_demand), 1.0)
         order = max(self.target_stock - float(inventory), 0.0)
         if not self.enforce_action_cap:
             return order
         max_inventory_level = self.max_order_factor * historical_mean
         return min(order, max(max_inventory_level - float(inventory), 0.0))
+
+    def observe_demand(self, demand: float) -> None:
+        """Advance the observable history after the current demand is revealed."""
+        if self.roll_history:
+            self.history = [*self.history[1:], float(demand)]
 
 
 def _evaluate_baseline(
@@ -388,7 +471,7 @@ def _evaluate_baseline(
         policy_factory(product),
         horizon=settings["evaluation_horizon"],
         n_episodes=1,
-        seed=settings["seed"] + 10_000 + index,
+        seed=paper_evaluation_seed_start("validation") + index,
         burn_in=settings["burn_in"],
     )
     return _product_metric_row(metrics, policy_name, product, settings, index, model_seed=None)
@@ -403,7 +486,7 @@ def _product_metric_row(
     model_seed: int | None,
 ) -> dict[str, Any]:
     """Attach explicit pairing keys to one product-level evaluation result."""
-    evaluation_seed = settings["seed"] + 10_000 + index
+    evaluation_seed = paper_evaluation_seed_start("validation") + index
     demand_path = paper_evaluation_demand_path(product, settings["evaluation_horizon"], evaluation_seed)
     demand_path_payload = json.dumps(demand_path.tolist(), separators=(",", ":")).encode("utf-8")
     demand_path_source = (
@@ -412,6 +495,7 @@ def _product_metric_row(
         else "sampled"
     )
     return {
+        **metrics,
         "run_seed": settings["seed"],
         "model_seed": model_seed,
         "product_generation_seed": settings["product_generation_seed"],
@@ -420,7 +504,6 @@ def _product_metric_row(
         "demand_path_id": hashlib.sha256(demand_path_payload).hexdigest()[:16],
         "policy_name": policy_name,
         "product_id": product.product_id,
-        **metrics,
     }
 
 

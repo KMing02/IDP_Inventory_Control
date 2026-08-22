@@ -1,0 +1,116 @@
+# Development replication of Maggiar et al. (2025), Basic Lost Sales.
+# This uses 5,000 rather than the paper's 40,000 training products and 500
+# validation products rather than the protected 100,000-product test set.
+
+history_length_H: 32
+training_horizon_T: 100
+evaluation_horizon: 520
+burn_in: 20
+training_products: 5000
+test_products: 500
+batch_size: 2500
+epochs: 1000
+optimizer: Adam
+learning_rate: 0.001
+include_terminal_salvage: true
+
+fcnn:
+  history_encoder: causal_cnn
+  hidden_layers: 2
+  hidden_units: 32
+  cnn_channels: 8
+  cnn_dilations: [1, 2, 4, 8, 16]
+  activation: ELU
+  imitation_epochs: 0
+  validation_interval: 1000
+  use_full_history: true
+  roll_history: true
+  scale_action_by_history_mean: false
+  max_order_factor: 4.0
+
+idp_benchmark:
+  seed: 2025
+  hidden_layers: 2
+  hidden_units: 32
+  activation: ELU
+  max_order_factor: 4.0
+  scale_action_by_history_mean: false
+  normalize_observations: false
+  normalize_reward_loss: false
+  include_terminal_salvage: true
+  initial_inventory_mode: last_historical_demand
+  enforce_action_cap: false
+  training_demand_mode: fixed_future
+  monotonicity_samples_per_product: 1
+  penalty_weights: [10.0]
+  raw_violation_threshold: 0.01
+  acceptance_reward_gap_tolerance_pct: 0.5
+  compact:
+    training_products: 5000
+    validation_products: 500
+    batch_size: 2500
+    training_horizon: 100
+    imitation_epochs: 0
+    reward_epochs: 1000
+    validation_interval: 1000
+    evaluation_horizon: 520
+    burn_in: 20
+    inventory_states: 61
+    structure_products: 3
+    order_up_to_products: 500
+    oracle_mc_samples: 200000
+    penalty_weights: [10.0]
+  full:
+    training_products: 40000
+    validation_products: 100000
+    batch_size: 2500
+    training_horizon: 100
+    imitation_epochs: 0
+    reward_epochs: 1000
+    validation_interval: 1000
+    evaluation_horizon: 520
+    burn_in: 20
+    inventory_states: 100
+    structure_products: 3
+    order_up_to_products: 1000
+    oracle_mc_samples: 200000
+    penalty_weights: [10.0]
+  paper_replication:
+    training_products: 40000
+    validation_products: 100000
+    batch_size: 2500
+    training_horizon: 100
+    imitation_epochs: 0
+    reward_epochs: 1000
+    validation_interval: 1000
+    evaluation_horizon: 520
+    burn_in: 20
+    inventory_states: 100
+    structure_products: 3
+    order_up_to_products: 1000
+    oracle_mc_samples: 200000
+    penalty_weights: [10.0]
+
+demand_distribution: Gamma
+
+product_features:
+  - price
+  - purchase_cost
+  - holding_cost
+  - lost_sale_penalty
+  - mean_demand
+  - coefficient_of_variation
+
+product_generation:
+  seed: 2025
+  mode: paper_table_1
+  price_mean: 100.0
+  holding_cost_mean: 5.0
+  mean_demand_mean: 100.0
+  lost_sale_penalty_max: 10.0
+  coefficient_of_variation_range: [0.0, 1.0]
+
+tuning:
+  min_stock_level: 0
+  max_stock_level: 120
+  oracle_mc_samples: 200000

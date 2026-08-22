@@ -30,6 +30,8 @@ from inventory_control.policies.neural.monokan import make_paper_base_stock_outp
 from inventory_control.policies.neural.monokan import make_paper_base_stock_output_monokan_model
 from inventory_control.policies.neural.monokan import make_paper_base_stock_output_kan_model
 from inventory_control.policies.neural.monokan import (
+    make_paper_deep_grid7_direct_target_stock_kan_model,
+    make_paper_deep_grid7_direct_target_stock_monokan_model,
     make_paper_direct_target_stock_kan_model,
     make_paper_direct_target_stock_monokan_model,
     make_paper_direct_target_stock_monokan_model_for_products,
@@ -39,6 +41,7 @@ from inventory_control.policies.neural.monokan import (
 )
 from inventory_control.policies.neural.registry import (
     BASE_STOCK_OUTPUT_POLICY_NAMES,
+    CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES,
     DIRECT_TARGET_STOCK_POLICY_NAMES,
     SELECTIVE_DIRECT_TARGET_STOCK_POLICY_NAMES,
     checkpoint_filenames,
@@ -94,6 +97,31 @@ def test_base_stock_output_experiment_propagates_terminal_salvage_setting(
     assert artifacts.metadata["include_terminal_salvage"] is False
 
 
+def test_base_stock_output_experiment_propagates_activation_checkpointing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import inventory_control.base_stock_output_experiment as experiment_module
+
+    observed: list[bool] = []
+    original_train = experiment_module.train_paper_lost_sales_fcnn
+
+    def train_spy(*args, **kwargs):
+        observed.append(kwargs["checkpoint_rolling_target"])
+        return original_train(*args, **kwargs)
+
+    monkeypatch.setattr(experiment_module, "train_paper_lost_sales_fcnn", train_spy)
+    run_base_stock_output_experiment(
+        config_path="configs/paper_lost_sales_debug.yaml",
+        output_dir=tmp_path / "run",
+        models=("PaperFCNNDirectTargetStock",),
+        device="cpu",
+        activation_checkpointing=False,
+    )
+
+    assert observed == [False]
+
+
 def test_base_stock_evaluation_caches_context_target_across_periods() -> None:
     class CountingTarget(torch.nn.Module):
         def __init__(self) -> None:
@@ -121,6 +149,47 @@ def test_base_stock_evaluation_caches_context_target_across_periods() -> None:
     assert model.calls == 1
     assert first_order == pytest.approx(2.0 * historical_mean)
     assert second_order == pytest.approx(historical_mean)
+
+
+def test_base_stock_evaluation_rolls_history_and_recomputes_target() -> None:
+    class RecordingTarget(torch.nn.Module):
+        paper_roll_history = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.inputs: list[torch.Tensor] = []
+
+        def forward(self, context: torch.Tensor) -> torch.Tensor:
+            self.inputs.append(context.detach().clone())
+            return context[:, 2]
+
+    product = PaperLostSalesProductGenerator(_paper_config()).generate(1, "test")[0]
+    product = product.__class__(
+        **{
+            **product.__dict__,
+            "historical_demand": [1, 2, 3],
+            "future_demand": [4, 99],
+        }
+    )
+    model = RecordingTarget()
+    adapter = _TorchBaseStockPolicyAdapter(
+        model,
+        product,
+        compute_paper_fcnn_feature_stats([product]),
+        max_order_factor=4.0,
+        enforce_action_cap=False,
+    )
+
+    low_inventory_order = adapter.act(inventory=0.0, t=0)
+    high_inventory_order = adapter.act(inventory=1.0, t=0)
+    adapter.observe_demand(4.0)
+    adapter.act(inventory=0.0, t=1)
+
+    assert low_inventory_order > high_inventory_order
+    assert model.inputs[-3].shape[1] == 7  # Context excludes current inventory.
+    assert model.inputs[-3][0, :3].tolist() == pytest.approx(model.inputs[-2][0, :3].tolist())
+    assert model.inputs[-1][0, :3].tolist() != pytest.approx(model.inputs[-2][0, :3].tolist())
+    assert 99.0 not in model.inputs[-1][0].tolist()
 
 
 def test_base_stock_registry_exposes_current_monokan_comparison() -> None:
@@ -172,6 +241,65 @@ def test_selective_direct_target_registry_and_constraints_are_explicit() -> None
     assert not set(range(32)).intersection(monokan.monotonic_vars)
     assert kan.paper_include_demand_level_feature is True
     assert monokan.paper_include_demand_level_feature is True
+
+
+def test_capacity_direct_target_registry_is_fixed_and_checkpointed() -> None:
+    filenames = checkpoint_filenames()
+    config = {
+        **_paper_config(),
+        "paper_history_feature_mode": "raw_lags",
+        "monokan": {"hidden_layers": 1, "hidden_units": 4, "grid": 3},
+    }
+
+    kan = make_paper_deep_grid7_direct_target_stock_kan_model(config)
+    monokan = make_paper_deep_grid7_direct_target_stock_monokan_model(config)
+
+    assert CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES == (
+        "KANDirectTargetStockDeepGrid7",
+        "MonoKANDirectTargetStockDeepGrid7",
+    )
+    assert filenames["KANDirectTargetStockDeepGrid7"] == "kan_direct_target_stock_deep_grid7.pt"
+    assert filenames["MonoKANDirectTargetStockDeepGrid7"] == "monokan_direct_target_stock_deep_grid7.pt"
+    assert [layer.out_dim for layer in kan.layers] == [16, 16, 1]
+    assert all(layer.num_grid_intervals == 7 for layer in kan.layers)
+    assert kan.monotonic_vars == {}
+    assert [layer.out_dim for layer in monokan.layers] == [16, 16, 1]
+    assert all(layer.num_grid_intervals == 7 for layer in monokan.layers)
+    assert monokan.monotonic_vars == {**{index: 1 for index in range(32)}, 32: 1, 33: -1, 34: -1, 35: 1}
+
+
+def test_temporal_deep_grid7_monokan_constrains_only_lags_means_and_economics() -> None:
+    config = {
+        **_paper_config(),
+        "paper_history_feature_mode": "raw_lags_temporal",
+        "monokan": {"hidden_layers": 2, "hidden_units": 16, "grid": 7},
+    }
+
+    model = make_paper_deep_grid7_direct_target_stock_monokan_model(config)
+
+    assert model.layers[0].in_dim == 41
+    assert all(model.monotonic_vars[index] == 1 for index in range(35))
+    assert 35 not in model.monotonic_vars  # population std_32
+    assert 36 not in model.monotonic_vars  # OLS trend_8
+    assert model.monotonic_vars[37] == 1
+    assert model.monotonic_vars[38] == -1
+    assert model.monotonic_vars[39] == -1
+    assert model.monotonic_vars[40] == 1
+
+
+def test_capacity_medium_profile_preserves_the_existing_medium_protocol() -> None:
+    capacity = yaml.safe_load(
+        Path("configs/paper_lost_sales_direct_target_capacity_medium.yaml").read_text(encoding="utf-8")
+    )
+    reference = yaml.safe_load(
+        Path("configs/paper_lost_sales_selective_monotonicity_medium.yaml").read_text(encoding="utf-8")
+    )
+
+    assert _compact_settings(capacity) == _compact_settings(reference)
+    assert capacity["product_generation"] == reference["product_generation"]
+    assert capacity["paper_history_feature_mode"] == "raw_lags"
+    assert capacity["paper_include_newsvendor_feature"] is False
+    assert capacity["idp_benchmark"]["compact"]["imitation_epochs"] == 0
 
 
 def test_selective_demand_level_feature_is_inserted_before_economics() -> None:
@@ -694,6 +822,43 @@ def test_base_stock_output_experiment_runs_pure_direct_models_without_anchor_or_
     assert not learned["persistent_newsvendor_anchor"].any()
     assert artifacts.target_diagnostics["near_upper_bound"].isna().all()
     assert not artifacts.target_diagnostics["action_cap_enforced"].any()
+
+
+def test_matched_direct_target_run_shares_training_draws_and_saves_final_checkpoints(tmp_path) -> None:
+    config = yaml.safe_load(Path("configs/paper_lost_sales_debug.yaml").read_text(encoding="utf-8"))
+    config["idp_benchmark"]["compact"].update(
+        {
+            "training_products": 4,
+            "validation_products": 2,
+            "batch_size": 2,
+            "training_horizon": 2,
+            "reward_epochs": 1,
+            "validation_interval": 1,
+            "evaluation_horizon": 2,
+        }
+    )
+    config["monokan"] = {"hidden_layers": 1, "hidden_units": 2, "grid": 2, "roll_history": False}
+    config_path = tmp_path / "matched.yaml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    artifacts = run_base_stock_output_experiment(
+        config_path=config_path,
+        output_dir=tmp_path / "run",
+        models=("PaperFCNNDirectTargetStock", "MonoKANDirectTargetStockDeepGrid7"),
+        device="cpu",
+        seed=2025,
+        shared_training_seed=True,
+    )
+    learned = artifacts.summary.loc[artifacts.summary["model_seed"].notna()]
+
+    assert learned["training_seed"].tolist() == [2025, 2025]
+    assert learned["model_seed"].nunique() == 2
+    assert artifacts.metadata["shared_training_seed"] is True
+    for row in learned.itertuples(index=False):
+        assert (tmp_path / "run" / row.checkpoint_filename).exists()
+        assert (tmp_path / "run" / row.final_checkpoint_filename).exists()
+        assert row.selected_checkpoint_epoch == 1
+        assert row.final_checkpoint_epoch == 1
 
 
 def test_paper_aligned_5k_config_resolves_without_protocol_overrides() -> None:

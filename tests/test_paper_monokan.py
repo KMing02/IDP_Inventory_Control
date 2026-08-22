@@ -2,6 +2,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from inventory_control.policies.neural.monokan import _evaluate_hermite_curves
+
 from inventory_control.policies.neural.fcnn import compute_paper_fcnn_feature_stats
 from inventory_control.policies.neural.constrained_mlp import make_paper_residual_order_up_to_constrained_mlp_model
 from inventory_control.policies.neural.monokan import (
@@ -634,3 +636,98 @@ def test_sampled_monokan_edge_matches_first_layer_evaluation() -> None:
     reconstructed = layer_values.T - other_edge_contribution.unsqueeze(1)
 
     assert torch.allclose(reconstructed, sampled, atol=1e-5)
+
+def test_arithmetic_hermite_interval_lookup_matches_mask_reference_and_gradients() -> None:
+    def reference(x_eval: torch.Tensor, grid: torch.Tensor, coef: torch.Tensor) -> torch.Tensor:
+        from inventory_control.policies.neural.monokan import _hermite_basis
+
+        points = grid.shape[1]
+        idx = (x_eval.unsqueeze(1) >= grid.unsqueeze(2)).sum(dim=1) - 1
+        idx = idx.clamp(min=0, max=points - 2)
+        idx_right = idx + 1
+        x0 = grid.gather(1, idx)
+        x1 = grid.gather(1, idx_right)
+        interval = torch.clamp(x1 - x0, min=1e-8)
+        t = (x_eval - x0) / interval
+        h00, h10, h01, h11 = _hermite_basis(t)
+        y0 = coef[:, :, 0].gather(1, idx)
+        dy0 = coef[:, :, 1].gather(1, idx)
+        y1 = coef[:, :, 0].gather(1, idx_right)
+        dy1 = coef[:, :, 1].gather(1, idx_right)
+        result = y0 * h00 + dy0 * interval * h10 + y1 * h01 + dy1 * interval * h11
+        result = torch.where(
+            x_eval < grid[:, [0]],
+            coef[:, [0], 0] + coef[:, [0], 1] * (x_eval - grid[:, [0]]),
+            result,
+        )
+        return torch.where(
+            x_eval > grid[:, [-1]],
+            coef[:, [-1], 0] + coef[:, [-1], 1] * (x_eval - grid[:, [-1]]),
+            result,
+        )
+
+    grid = torch.linspace(-2.0, 4.0, 8).repeat(3, 1)
+    x_reference = torch.tensor(
+        [[-3.0, -2.0, -0.5, 4.0, 5.0], [-1.9, 0.0, 1.5, 3.9, 4.1], [-4.0, -1.0, 2.0, 3.0, 6.0]],
+        requires_grad=True,
+    )
+    x_optimized = x_reference.detach().clone().requires_grad_(True)
+    coef_reference = torch.randn(3, 8, 2, generator=torch.Generator().manual_seed(8), requires_grad=True)
+    coef_optimized = coef_reference.detach().clone().requires_grad_(True)
+
+    expected = reference(x_reference, grid, coef_reference)
+    actual = _evaluate_hermite_curves(x_optimized, grid, coef_optimized)
+    expected.sum().backward()
+    actual.sum().backward()
+
+    assert torch.allclose(expected, actual, atol=1e-6)
+    assert torch.allclose(x_reference.grad, x_optimized.grad, atol=1e-6)
+    assert torch.allclose(coef_reference.grad, coef_optimized.grad, atol=1e-6)
+
+
+def test_arithmetic_hermite_interval_lookup_matches_mask_at_knots_and_boundaries() -> None:
+    def reference(x_eval: torch.Tensor, grid: torch.Tensor, coef: torch.Tensor) -> torch.Tensor:
+        from inventory_control.policies.neural.monokan import _hermite_basis
+
+        points = grid.shape[1]
+        idx = (x_eval.unsqueeze(1) >= grid.unsqueeze(2)).sum(dim=1) - 1
+        idx = idx.clamp(min=0, max=points - 2)
+        right = idx + 1
+        x0 = grid.gather(1, idx)
+        x1 = grid.gather(1, right)
+        interval = torch.clamp(x1 - x0, min=1e-8)
+        t = (x_eval - x0) / interval
+        h00, h10, h01, h11 = _hermite_basis(t)
+        y0 = coef[:, :, 0].gather(1, idx)
+        dy0 = coef[:, :, 1].gather(1, idx)
+        y1 = coef[:, :, 0].gather(1, right)
+        dy1 = coef[:, :, 1].gather(1, right)
+        result = y0 * h00 + dy0 * interval * h10 + y1 * h01 + dy1 * interval * h11
+        result = torch.where(
+            x_eval < grid[:, [0]],
+            coef[:, [0], 0] + coef[:, [0], 1] * (x_eval - grid[:, [0]]),
+            result,
+        )
+        return torch.where(
+            x_eval > grid[:, [-1]],
+            coef[:, [-1], 0] + coef[:, [-1], 1] * (x_eval - grid[:, [-1]]),
+            result,
+        )
+
+    knots = torch.linspace(-2.0, 4.0, 8)
+    epsilon = 1e-6
+    probes = torch.cat(
+        [
+            knots,
+            knots[1:-1] - epsilon,
+            knots[1:-1] + epsilon,
+            torch.tensor([knots[0] + epsilon, knots[-1] - epsilon]),
+        ]
+    ).unsqueeze(0)
+    grid = knots.unsqueeze(0)
+    coef = torch.randn(1, 8, 2, generator=torch.Generator().manual_seed(19))
+
+    expected = reference(probes, grid, coef)
+    actual = _evaluate_hermite_curves(probes, grid, coef)
+
+    assert torch.allclose(expected, actual, atol=1e-6, rtol=1e-6)

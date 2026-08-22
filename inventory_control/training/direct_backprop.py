@@ -13,6 +13,7 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError("Install neural dependencies with `python -m pip install -r requirements-neural.txt`.") from exc
 
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from inventory_control.policies.neural.fcnn import (
     FCNNPolicy,
@@ -20,6 +21,7 @@ from inventory_control.policies.neural.fcnn import (
     build_paper_history_features,
     empirical_newsvendor_target_ratio_from_features,
     infer_model_device,
+    paper_temporal_summary_features,
 )
 from inventory_control.paper_lost_sales import non_omniscient_gamma_base_stock_policy
 from inventory_control.paper_lost_sales import historical_empirical_quantile, paper_critical_quantile
@@ -27,6 +29,7 @@ from inventory_control.products import PaperLostSalesProduct
 
 
 PAPER_FCNN_MAX_ORDER_FACTOR = 2.0
+PAPER_ROLLING_TARGET_CONTEXT_CHUNK_SIZE = 10000
 
 
 def default_torch_device() -> torch.device:
@@ -88,6 +91,7 @@ def make_paper_lost_sales_training_batch(
         raise ValueError(f"Unsupported initial inventory mode: {initial_inventory_mode}")
     demand_paths = []
     histories = []
+    temporal_summaries = []
     newsvendor_features = []
     demand_scale = 1.0
     price_scale = 1.0
@@ -103,12 +107,20 @@ def make_paper_lost_sales_training_batch(
                 torch.tensor(product.sample_demand(_torch_seeded_numpy_rng(generator), size=horizon), dtype=torch.float32)
             )
         scale = torch.tensor(demand_scale, dtype=torch.float32) if feature_stats is not None else torch.clamp(history.mean(), min=1.0)
-        histories.append(
-            torch.tensor(
-                build_paper_history_features(history.tolist(), float(scale.item()), mode=history_feature_mode),
+        if history_feature_mode == "raw_lags_temporal":
+            normalized_history = torch.tensor(
+                build_paper_history_features(history.tolist(), float(scale.item()), mode="raw_lags"),
                 dtype=torch.float32,
             )
-        )
+            histories.append(normalized_history)
+            temporal_summaries.append(paper_temporal_summary_features(normalized_history))
+        else:
+            histories.append(
+                torch.tensor(
+                    build_paper_history_features(history.tolist(), float(scale.item()), mode=history_feature_mode),
+                    dtype=torch.float32,
+                )
+            )
         if include_newsvendor_feature:
             newsvendor_features.append(
                 empirical_newsvendor_target_ratio_from_features(
@@ -155,6 +167,8 @@ def make_paper_lost_sales_training_batch(
     }
     if include_newsvendor_feature:
         batch["empirical_newsvendor_target_ratio"] = torch.tensor(newsvendor_features, dtype=torch.float32)
+    if temporal_summaries:
+        batch["temporal_summary_features"] = torch.stack(temporal_summaries, dim=0)
     if include_demand_level_feature:
         batch["demand_level_feature"] = batch["historical_mean_demand"] / torch.clamp(
             batch["feature_demand_scale"], min=1.0
@@ -188,6 +202,7 @@ def paper_lost_sales_raw_order(
     batch: dict[str, torch.Tensor],
     inventory: torch.Tensor,
     scale_action_by_history_mean: bool = False,
+    checkpoint_model: bool = False,
 ) -> torch.Tensor:
     """Return uncapped policy orders for a batch and inventory vector."""
     return paper_lost_sales_uncapped_order(
@@ -195,6 +210,7 @@ def paper_lost_sales_raw_order(
         batch,
         inventory,
         scale_action_by_history_mean=scale_action_by_history_mean,
+        checkpoint_model=checkpoint_model,
     )
 
 
@@ -269,6 +285,8 @@ def paper_lost_sales_context_features(batch: dict[str, torch.Tensor]) -> torch.T
         dim=1,
     )
     context_parts = [batch["history"]]
+    if "temporal_summary_features" in batch:
+        context_parts.append(batch["temporal_summary_features"])
     if "demand_level_feature" in batch:
         context_parts.append(batch["demand_level_feature"].unsqueeze(-1))
     context_parts.append(economics)
@@ -282,6 +300,7 @@ def paper_lost_sales_uncapped_order(
     batch: dict[str, torch.Tensor],
     inventory: torch.Tensor,
     scale_action_by_history_mean: bool = False,
+    checkpoint_model: bool = False,
 ) -> torch.Tensor:
     """Decode the model's uncapped purchase quantity for supported parameterizations."""
     parameterization = getattr(model, "paper_action_parameterization", "raw")
@@ -291,27 +310,109 @@ def paper_lost_sales_uncapped_order(
 
     historical_mean = torch.clamp(batch["historical_mean_demand"], min=1.0)
     features = paper_lost_sales_features(batch, inventory)
-    order = model(features)
+    order = (
+        checkpoint(model, features, use_reentrant=False)
+        if checkpoint_model and torch.is_grad_enabled()
+        else model(features)
+    )
     if scale_action_by_history_mean:
         order = order * historical_mean
     return order
 
 
-def paper_lost_sales_target_level(model: nn.Module, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+def paper_lost_sales_target_level(
+    model: nn.Module,
+    batch: dict[str, torch.Tensor],
+    checkpoint_model: bool = False,
+) -> torch.Tensor:
     """Return target stock level for context-only action parameterizations."""
+    context = paper_lost_sales_context_features(batch)
+    model_output = (
+        checkpoint(model, context, use_reentrant=False)
+        if checkpoint_model and torch.is_grad_enabled()
+        else model(context)
+    )
+    return _paper_target_level_from_output(model, batch, model_output)
+
+
+def _paper_target_level_from_output(
+    model: nn.Module,
+    batch: dict[str, torch.Tensor],
+    model_output: torch.Tensor,
+) -> torch.Tensor:
+    """Decode context-network output into the target-stock level."""
     parameterization = getattr(model, "paper_action_parameterization", "raw")
     historical_mean = torch.clamp(batch["historical_mean_demand"], min=1.0)
     if parameterization == "order_up_to":
-        target_factor = model(paper_lost_sales_context_features(batch))
+        target_factor = model_output
         if bool(getattr(model, "paper_scale_target_by_history_mean", True)):
             return target_factor * historical_mean
         return target_factor
     if parameterization == "residual_order_up_to":
-        residual_factor = model(paper_lost_sales_context_features(batch))
+        residual_factor = model_output
         residual_center = float(getattr(model, "paper_residual_center", 0.0))
         residual_scale = float(getattr(model, "paper_residual_scale", 0.5))
         return batch["historical_base_stock_level"] + residual_scale * (residual_factor - residual_center) * historical_mean
     raise ValueError(f"Model parameterization {parameterization!r} does not predict a context target level")
+
+
+def paper_rolling_target_levels(
+    model: nn.Module,
+    batch: dict[str, torch.Tensor],
+    demand_paths: torch.Tensor,
+    checkpoint_model: bool = False,
+    chunk_size: int = PAPER_ROLLING_TARGET_CONTEXT_CHUNK_SIZE,
+) -> torch.Tensor:
+    """Predict causal rolling-history targets from flattened product-time contexts."""
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    history_feature_mode = str(getattr(model, "paper_history_feature_mode", "raw_lags"))
+    if history_feature_mode not in {"raw_lags", "raw_lags_temporal"}:
+        raise ValueError("rolling direct-target evaluation requires raw-lag-based history features")
+    history_length = batch["history"].shape[1]
+    normalized_demands = demand_paths / torch.clamp(batch["feature_demand_scale"], min=1.0).unsqueeze(1)
+    history_windows = torch.cat([batch["history"], normalized_demands], dim=1).unfold(
+        dimension=1,
+        size=history_length,
+        step=1,
+    )[:, : demand_paths.shape[1], :]
+    batch_size, horizon, _ = history_windows.shape
+    price_scale = torch.clamp(batch["feature_price_scale"], min=1.0)
+    economics = torch.stack(
+        [
+            batch["price"] / price_scale,
+            batch["purchase_cost"] / price_scale,
+            batch["holding_cost"] / price_scale,
+            batch["lost_sale_penalty"] / price_scale,
+        ],
+        dim=1,
+    )
+    context_parts = [history_windows]
+    if history_feature_mode == "raw_lags_temporal":
+        context_parts.append(paper_temporal_summary_features(history_windows))
+    if "demand_level_feature" in batch:
+        context_parts.append(batch["demand_level_feature"][:, None, None].expand(-1, horizon, -1))
+    context_parts.append(economics[:, None, :].expand(-1, horizon, -1))
+    if "empirical_newsvendor_target_ratio" in batch:
+        context_parts.append(batch["empirical_newsvendor_target_ratio"][:, None, None].expand(-1, horizon, -1))
+    flat_contexts = torch.cat(context_parts, dim=2).reshape(batch_size * horizon, -1)
+    flat_historical_mean = batch["historical_mean_demand"][:, None].expand(-1, horizon).reshape(-1)
+    flat_batch = {
+        "historical_mean_demand": flat_historical_mean,
+        "historical_base_stock_level": batch["historical_base_stock_level"][:, None].expand(-1, horizon).reshape(-1),
+    }
+    target_chunks = []
+    for start in range(0, flat_contexts.shape[0], chunk_size):
+        end = min(start + chunk_size, flat_contexts.shape[0])
+        context_chunk = flat_contexts[start:end]
+        model_output = (
+            checkpoint(model, context_chunk, use_reentrant=False)
+            if checkpoint_model and torch.is_grad_enabled()
+            else model(context_chunk)
+        )
+        chunk_batch = {name: value[start:end] for name, value in flat_batch.items()}
+        target_chunks.append(_paper_target_level_from_output(model, chunk_batch, model_output))
+    return torch.cat(target_chunks).reshape(batch_size, horizon)
 
 
 def paper_inventory_monotonicity_penalty(
@@ -486,6 +587,8 @@ def paper_lost_sales_fcnn_rollout(
     scale_action_by_history_mean: bool = False,
     include_terminal_salvage: bool = True,
     enforce_action_cap: bool = True,
+    checkpoint_rolling_target: bool = True,
+    checkpoint_raw_action: bool = False,
 ) -> torch.Tensor:
     """Return total reward per product for FCNN training."""
     inventory = batch["initial_inventory"]
@@ -493,18 +596,41 @@ def paper_lost_sales_fcnn_rollout(
     horizon = demand_paths.shape[1]
     total_reward = torch.zeros_like(inventory)
     parameterization = getattr(model, "paper_action_parameterization", "raw")
+    roll_history = bool(getattr(model, "paper_roll_history", False))
+    rollout_batch = dict(batch) if roll_history else batch
+    uses_target_level = parameterization in {"order_up_to", "residual_order_up_to"}
+    rolling_target_levels = (
+        paper_rolling_target_levels(
+            model,
+            batch,
+            demand_paths,
+            checkpoint_model=checkpoint_rolling_target,
+        )
+        if uses_target_level and roll_history
+        else None
+    )
     target_level = (
-        paper_lost_sales_target_level(model, batch)
-        if parameterization in {"order_up_to", "residual_order_up_to"}
+        paper_lost_sales_target_level(model, rollout_batch)
+        if uses_target_level and not roll_history
         else None
     )
     max_inventory_level = float(max_order_factor) * torch.clamp(batch["historical_mean_demand"], min=1.0)
     for t in range(horizon):
-        if target_level is None:
+        if uses_target_level:
+            current_target_level = (
+                rolling_target_levels[:, t]
+                if rolling_target_levels is not None
+                else target_level
+            )
+            assert current_target_level is not None
+            order = torch.relu(current_target_level - inventory)
+            if enforce_action_cap:
+                order = torch.minimum(order, torch.relu(max_inventory_level - inventory))
+        else:
             if enforce_action_cap:
                 order = paper_lost_sales_fcnn_order(
                     model,
-                    batch,
+                    rollout_batch,
                     inventory,
                     max_order_factor=max_order_factor,
                     scale_action_by_history_mean=scale_action_by_history_mean,
@@ -512,14 +638,11 @@ def paper_lost_sales_fcnn_rollout(
             else:
                 order = paper_lost_sales_raw_order(
                     model,
-                    batch,
+                    rollout_batch,
                     inventory,
                     scale_action_by_history_mean=scale_action_by_history_mean,
+                    checkpoint_model=checkpoint_raw_action,
                 )
-        else:
-            order = torch.relu(target_level - inventory)
-            if enforce_action_cap:
-                order = torch.minimum(order, torch.relu(max_inventory_level - inventory))
         demand = demand_paths[:, t]
         available = inventory + order
         sales = torch.minimum(demand, available)
@@ -533,6 +656,12 @@ def paper_lost_sales_fcnn_rollout(
         )
         total_reward = total_reward + reward
         inventory = ending_inventory
+        if roll_history and not uses_target_level:
+            observed = demand / torch.clamp(batch["feature_demand_scale"], min=1.0)
+            rollout_batch["history"] = torch.cat(
+                [rollout_batch["history"][:, 1:], observed.unsqueeze(1)],
+                dim=1,
+            )
     if include_terminal_salvage:
         total_reward = total_reward + batch["purchase_cost"] * inventory
     return total_reward
@@ -545,6 +674,8 @@ def paper_lost_sales_policy_rollout(
     scale_action_by_history_mean: bool = False,
     include_terminal_salvage: bool = True,
     enforce_action_cap: bool = True,
+    checkpoint_rolling_target: bool = True,
+    checkpoint_raw_action: bool = False,
 ) -> torch.Tensor:
     """Architecture-neutral alias for the shared differentiable paper rollout."""
     return paper_lost_sales_fcnn_rollout(
@@ -554,6 +685,8 @@ def paper_lost_sales_policy_rollout(
         scale_action_by_history_mean=scale_action_by_history_mean,
         include_terminal_salvage=include_terminal_salvage,
         enforce_action_cap=enforce_action_cap,
+        checkpoint_rolling_target=checkpoint_rolling_target,
+        checkpoint_raw_action=checkpoint_raw_action,
     )
 
 
@@ -675,6 +808,8 @@ def train_paper_lost_sales_fcnn(
     initial_inventory_mode: str = "historical_mean",
     enforce_action_cap: bool | None = None,
     clip_imitation_predictions: bool = True,
+    checkpoint_rolling_target: bool = True,
+    checkpoint_raw_action: bool = False,
     device: torch.device | str | None = None,
 ) -> DirectBackpropResult:
     """Train FCNN with DirectBackprop-style negative reward minimization."""
@@ -744,6 +879,8 @@ def train_paper_lost_sales_fcnn(
                 scale_action_by_history_mean=scale_action_by_history_mean,
                 include_terminal_salvage=include_terminal_salvage,
                 enforce_action_cap=effective_enforce_action_cap,
+                checkpoint_rolling_target=checkpoint_rolling_target,
+                checkpoint_raw_action=checkpoint_raw_action,
             ).mean()
             primary_loss = historical_base_stock_imitation_loss(
                 model,
@@ -761,6 +898,8 @@ def train_paper_lost_sales_fcnn(
                 scale_action_by_history_mean=scale_action_by_history_mean,
                 include_terminal_salvage=include_terminal_salvage,
                 enforce_action_cap=effective_enforce_action_cap,
+                checkpoint_rolling_target=checkpoint_rolling_target,
+                checkpoint_raw_action=checkpoint_raw_action,
             ).mean()
             primary_loss = -mean_total_reward
             if normalize_reward_loss:

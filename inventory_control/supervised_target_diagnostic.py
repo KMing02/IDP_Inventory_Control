@@ -166,8 +166,9 @@ def run_supervised_target_diagnostic(
     prediction_frames: list[pd.DataFrame] = []
     log_frames: list[pd.DataFrame] = []
     sensitivity_frames: list[pd.DataFrame] = []
-    for model_index, model_name in enumerate(models):
-        model_seed = settings["seed"] + model_index
+    for model_name in models:
+        # A model's result must not depend on which comparators precede it.
+        model_seed = settings["seed"]
         torch.manual_seed(model_seed)
         model = _make_diagnostic_model(
             model_name,
@@ -231,6 +232,7 @@ def run_supervised_target_diagnostic(
         "test_split_used": False,
         "config_path": str(config_path),
         "models": list(models),
+        "model_seeds": {model_name: settings["seed"] for model_name in models},
         "settings": settings,
         "feature_stats": {
             "demand_scale": feature_stats.demand_scale,

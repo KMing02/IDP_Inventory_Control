@@ -7,15 +7,20 @@ from inventory_control.policies.neural.fcnn import (
     FCNNPolicy,
     PaperCausalCNNPolicy,
     PaperContextCausalCNNPolicy,
+    PaperFCNNFeatureStats,
     PaperFCNNPolicyAdapter,
+    build_paper_history_features,
     compute_paper_fcnn_feature_stats,
     make_paper_direct_target_stock_fcnn_model,
+    paper_temporal_summary_features,
 )
 from inventory_control.training.direct_backprop import (
     make_paper_lost_sales_training_batch,
     paper_inventory_monotonicity_penalty,
     paper_lost_sales_fcnn_order,
     paper_lost_sales_fcnn_rollout,
+    paper_lost_sales_target_level,
+    paper_rolling_target_levels,
     paper_reward_normalization_scale,
     train_paper_lost_sales_fcnn,
 )
@@ -120,6 +125,349 @@ def test_paper_rollout_returns_reward_not_negative_reward() -> None:
     rewards = paper_lost_sales_fcnn_rollout(model, batch)
 
     assert rewards.shape == (2,)
+
+
+def test_raw_paper_fcnn_rollout_uses_only_rolling_observed_history() -> None:
+    class RecordingRawPolicy(torch.nn.Module):
+        paper_action_parameterization = "raw"
+        paper_roll_history = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.bias = torch.nn.Parameter(torch.tensor(0.0))
+            self.inputs: list[torch.Tensor] = []
+
+        def forward(self, features: torch.Tensor) -> torch.Tensor:
+            self.inputs.append(features.detach().clone())
+            return self.bias.expand(features.shape[0])
+
+    product = PaperLostSalesProductGenerator(_paper_config()).generate(1, "train")[0]
+    product = product.__class__(
+        **{
+            **product.__dict__,
+            "historical_demand": [1, 2, 3],
+            "future_demand": [4, 99],
+        }
+    )
+    model = RecordingRawPolicy()
+    batch = make_paper_lost_sales_training_batch(
+        [product],
+        horizon=2,
+        generator=torch.Generator().manual_seed(0),
+        feature_stats=PaperFCNNFeatureStats(demand_scale=1.0, price_scale=1.0),
+    )
+    batch["initial_inventory"] = torch.tensor([10.0])
+
+    paper_lost_sales_fcnn_rollout(
+        model,
+        batch,
+        include_terminal_salvage=False,
+        enforce_action_cap=False,
+    )
+
+    assert len(model.inputs) == 2
+    assert model.inputs[0][0, :4].tolist() == pytest.approx([10.0, 1.0, 2.0, 3.0])
+    assert model.inputs[1][0, :4].tolist() == pytest.approx([6.0, 2.0, 3.0, 4.0])
+    assert 99.0 not in model.inputs[1][0].tolist()
+
+
+def test_direct_target_rollout_recomputes_target_from_causal_rolling_history() -> None:
+    class RecordingTargetPolicy(torch.nn.Module):
+        paper_action_parameterization = "order_up_to"
+        paper_scale_target_by_history_mean = True
+        paper_roll_history = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.bias = torch.nn.Parameter(torch.tensor(0.0))
+            self.inputs: list[torch.Tensor] = []
+
+        def forward(self, context: torch.Tensor) -> torch.Tensor:
+            self.inputs.append(context.detach().clone())
+            return context[:, 2] + self.bias
+
+    product = PaperLostSalesProductGenerator(_paper_config()).generate(1, "train")[0]
+    product = product.__class__(
+        **{
+            **product.__dict__,
+            "historical_demand": [1, 2, 3],
+            "future_demand": [4, 99],
+        }
+    )
+    model = RecordingTargetPolicy()
+    batch = make_paper_lost_sales_training_batch(
+        [product],
+        horizon=2,
+        generator=torch.Generator().manual_seed(0),
+        feature_stats=PaperFCNNFeatureStats(demand_scale=1.0, price_scale=1.0),
+    )
+    batch["initial_inventory"] = torch.tensor([10.0])
+
+    paper_lost_sales_fcnn_rollout(
+        model,
+        batch,
+        include_terminal_salvage=False,
+        enforce_action_cap=False,
+    )
+
+    observed_inputs = torch.cat(model.inputs, dim=0)
+    assert observed_inputs.shape == (2, 7)  # Three history values plus four economics; no inventory.
+    assert observed_inputs[0, :3].tolist() == pytest.approx([1.0, 2.0, 3.0])
+    assert observed_inputs[1, :3].tolist() == pytest.approx([2.0, 3.0, 4.0])
+    assert 10.0 not in observed_inputs[0, :3].tolist()
+    assert 99.0 not in observed_inputs[1].tolist()
+
+
+def test_temporal_history_features_use_documented_causal_definitions() -> None:
+    history = torch.arange(1, 33, dtype=torch.float32)
+    summaries = paper_temporal_summary_features(history)
+    features = build_paper_history_features(history.tolist(), demand_scale=2.0, mode="raw_lags_temporal")
+
+    assert summaries[:3].tolist() == pytest.approx([16.5, 28.5, 30.5])
+    assert summaries[3].item() == pytest.approx(history.std(unbiased=False).item())
+    assert summaries[4].item() == pytest.approx(1.0)
+    assert features[:32] == pytest.approx((history / 2.0).tolist())
+    assert features[32:] == pytest.approx((summaries / 2.0).tolist())
+
+
+def test_temporal_rolling_targets_match_sequential_trajectory_and_gradients() -> None:
+    class TinyTemporalTargetPolicy(torch.nn.Module):
+        paper_action_parameterization = "order_up_to"
+        paper_scale_target_by_history_mean = True
+        paper_history_feature_mode = "raw_lags_temporal"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = torch.nn.Linear(41, 1)
+            torch.nn.init.constant_(self.linear.weight, 0.002)
+            torch.nn.init.constant_(self.linear.bias, 0.5)
+
+        def forward(self, context: torch.Tensor) -> torch.Tensor:
+            return torch.nn.functional.softplus(self.linear(context)).squeeze(-1)
+
+    product = PaperLostSalesProductGenerator(_paper_config()).generate(1, "train")[0]
+    product = product.__class__(
+        **{
+            **product.__dict__,
+            "historical_demand": list(range(1, 33)),
+            "future_demand": [33, 999],
+            "initial_inventory": 0,
+        }
+    )
+    batch = make_paper_lost_sales_training_batch(
+        [product],
+        horizon=2,
+        generator=torch.Generator().manual_seed(0),
+        feature_stats=PaperFCNNFeatureStats(demand_scale=1.0, price_scale=1.0),
+        history_feature_mode="raw_lags_temporal",
+    )
+    batch["initial_inventory"] = torch.zeros(1)
+    sequential_model = TinyTemporalTargetPolicy()
+    vectorized_model = TinyTemporalTargetPolicy()
+    vectorized_model.load_state_dict(sequential_model.state_dict())
+
+    rolling_batch = dict(batch)
+    sequential_targets = []
+    for period in range(2):
+        sequential_targets.append(paper_lost_sales_target_level(sequential_model, rolling_batch))
+        observed = batch["demand_paths"][:, period] / batch["feature_demand_scale"]
+        rolling_batch["history"] = torch.cat([rolling_batch["history"][:, 1:], observed.unsqueeze(1)], dim=1)
+        rolling_batch["temporal_summary_features"] = paper_temporal_summary_features(rolling_batch["history"])
+    sequential_targets = torch.stack(sequential_targets, dim=1)
+    vectorized_targets = paper_rolling_target_levels(
+        vectorized_model,
+        batch,
+        batch["demand_paths"],
+        checkpoint_model=True,
+        chunk_size=1,
+    )
+
+    def trajectory(targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        inventory = batch["initial_inventory"]
+        actions, inventories, rewards = [], [], []
+        for period in range(2):
+            action = torch.relu(targets[:, period] - inventory)
+            demand = batch["demand_paths"][:, period]
+            available = inventory + action
+            sales = torch.minimum(demand, available)
+            lost_sales = torch.relu(demand - available)
+            inventory = torch.relu(available - demand)
+            reward = (
+                batch["price"] * sales
+                - batch["purchase_cost"] * action
+                - batch["lost_sale_penalty"] * lost_sales
+                - batch["holding_cost"] * inventory
+            )
+            actions.append(action)
+            inventories.append(inventory)
+            rewards.append(reward)
+        return torch.stack(actions, 1), torch.stack(inventories, 1), torch.stack(rewards, 1)
+
+    expected = trajectory(sequential_targets)
+    actual = trajectory(vectorized_targets)
+    expected[2].sum().backward()
+    actual[2].sum().backward()
+
+    assert torch.allclose(sequential_targets, vectorized_targets)
+    for expected_tensor, actual_tensor in zip(expected, actual, strict=True):
+        assert torch.allclose(expected_tensor, actual_tensor)
+    assert 999.0 not in batch["history"].tolist()[0]
+    assert torch.isfinite(vectorized_model.linear.weight.grad).all()
+    assert torch.allclose(sequential_model.linear.weight.grad, vectorized_model.linear.weight.grad, atol=1e-5)
+
+
+def test_checkpointed_direct_target_has_equivalent_output_and_gradient() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(2, "train")
+    batch = make_paper_lost_sales_training_batch(
+        products,
+        horizon=2,
+        generator=torch.Generator().manual_seed(0),
+    )
+    plain = make_paper_direct_target_stock_fcnn_model(_paper_config())
+    checkpointed = make_paper_direct_target_stock_fcnn_model(_paper_config())
+    checkpointed.load_state_dict(plain.state_dict())
+
+    plain_target = paper_lost_sales_target_level(plain, batch)
+    checkpointed_target = paper_lost_sales_target_level(checkpointed, batch, checkpoint_model=True)
+    plain_target.sum().backward()
+    checkpointed_target.sum().backward()
+
+    assert torch.allclose(plain_target, checkpointed_target)
+    for plain_parameter, checkpointed_parameter in zip(plain.parameters(), checkpointed.parameters(), strict=True):
+        assert torch.allclose(plain_parameter.grad, checkpointed_parameter.grad)
+
+
+def test_chunked_rolling_targets_match_periodwise_outputs_and_gradients() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(2, "train")
+    batch = make_paper_lost_sales_training_batch(
+        products,
+        horizon=3,
+        generator=torch.Generator().manual_seed(0),
+    )
+    periodwise = make_paper_direct_target_stock_fcnn_model(_paper_config())
+    chunked = make_paper_direct_target_stock_fcnn_model(_paper_config())
+    chunked.load_state_dict(periodwise.state_dict())
+    rolling_batch = dict(batch)
+    periodwise_targets = []
+    for period in range(3):
+        periodwise_targets.append(paper_lost_sales_target_level(periodwise, rolling_batch))
+        observed = batch["demand_paths"][:, period] / torch.clamp(batch["feature_demand_scale"], min=1.0)
+        rolling_batch["history"] = torch.cat([rolling_batch["history"][:, 1:], observed.unsqueeze(1)], dim=1)
+    expected = torch.stack(periodwise_targets, dim=1)
+    actual = paper_rolling_target_levels(
+        chunked,
+        batch,
+        batch["demand_paths"],
+        checkpoint_model=True,
+        chunk_size=2,
+    )
+    expected.sum().backward()
+    actual.sum().backward()
+
+    assert torch.allclose(expected, actual)
+    for expected_parameter, actual_parameter in zip(periodwise.parameters(), chunked.parameters(), strict=True):
+        assert torch.allclose(expected_parameter.grad, actual_parameter.grad, atol=1e-6)
+
+
+def test_vectorized_rolling_rollout_matches_sequential_trajectory_reward_and_gradients() -> None:
+    class TinyTargetPolicy(torch.nn.Module):
+        paper_action_parameterization = "order_up_to"
+        paper_scale_target_by_history_mean = True
+        paper_history_feature_mode = "raw_lags"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = torch.nn.Linear(7, 1)
+            torch.nn.init.constant_(self.linear.weight, 0.01)
+            torch.nn.init.constant_(self.linear.bias, 0.5)
+
+        def forward(self, context: torch.Tensor) -> torch.Tensor:
+            return torch.nn.functional.softplus(self.linear(context)).squeeze(-1)
+
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(2, "train")
+    products = [
+        product.__class__(
+            **{
+                **product.__dict__,
+                "historical_demand": [1 + index, 2 + index, 3 + index],
+                "future_demand": [4 + index, 2 + index, 5 + index],
+                "initial_inventory": 0,
+            }
+        )
+        for index, product in enumerate(products)
+    ]
+    batch = make_paper_lost_sales_training_batch(
+        products,
+        horizon=3,
+        generator=torch.Generator().manual_seed(0),
+        feature_stats=PaperFCNNFeatureStats(demand_scale=1.0, price_scale=1.0),
+    )
+    batch["initial_inventory"] = torch.zeros(2)
+    sequential_model = TinyTargetPolicy()
+    vectorized_model = TinyTargetPolicy()
+    vectorized_model.load_state_dict(sequential_model.state_dict())
+
+    rolling_batch = dict(batch)
+    sequential_targets = []
+    for period in range(3):
+        sequential_targets.append(paper_lost_sales_target_level(sequential_model, rolling_batch))
+        observed = batch["demand_paths"][:, period] / batch["feature_demand_scale"]
+        rolling_batch["history"] = torch.cat([rolling_batch["history"][:, 1:], observed.unsqueeze(1)], dim=1)
+    sequential_targets_tensor = torch.stack(sequential_targets, dim=1)
+    vectorized_targets = paper_rolling_target_levels(
+        vectorized_model,
+        batch,
+        batch["demand_paths"],
+        checkpoint_model=True,
+        chunk_size=4,
+    )
+
+    def trajectory(targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        inventory = batch["initial_inventory"]
+        inventories = [inventory]
+        actions = []
+        rewards = []
+        for period in range(3):
+            action = torch.relu(targets[:, period] - inventory)
+            demand = batch["demand_paths"][:, period]
+            available = inventory + action
+            sales = torch.minimum(demand, available)
+            lost_sales = torch.relu(demand - available)
+            inventory = torch.relu(available - demand)
+            reward = (
+                batch["price"] * sales
+                - batch["purchase_cost"] * action
+                - batch["lost_sale_penalty"] * lost_sales
+                - batch["holding_cost"] * inventory
+            )
+            actions.append(action)
+            inventories.append(inventory)
+            rewards.append(reward)
+        return (
+            torch.stack(actions, dim=1),
+            torch.stack(inventories, dim=1),
+            torch.stack(rewards, dim=1),
+            torch.stack(rewards, dim=1).sum(dim=1) + batch["purchase_cost"] * inventory,
+        )
+
+    sequential_actions, sequential_inventories, sequential_rewards, sequential_total = trajectory(
+        sequential_targets_tensor
+    )
+    vectorized_actions, vectorized_inventories, vectorized_rewards, vectorized_total = trajectory(
+        vectorized_targets
+    )
+    sequential_total.sum().backward()
+    vectorized_total.sum().backward()
+
+    assert torch.allclose(sequential_targets_tensor, vectorized_targets)
+    assert torch.allclose(sequential_actions, vectorized_actions)
+    assert torch.allclose(sequential_inventories, vectorized_inventories)
+    assert torch.allclose(sequential_rewards, vectorized_rewards)
+    assert torch.allclose(sequential_total, vectorized_total)
+    for sequential_parameter, vectorized_parameter in zip(
+        sequential_model.parameters(), vectorized_model.parameters(), strict=True
+    ):
+        assert torch.allclose(sequential_parameter.grad, vectorized_parameter.grad, atol=1e-5)
 
 
 def test_paper_rollout_includes_terminal_salvage_by_default() -> None:
