@@ -34,7 +34,7 @@ commit recorded at the end of this document.
 | Residual order-up-to | Does a historical anchor plus an order-up-to decoder remove the raw-action clipping failure and support paired OOD analysis? | The clipping-dominated failure disappeared; KAN and MonoKAN were operationally near-tied, with MonoKAN structurally constrained but not reward-superior. | `configs/paper_lost_sales_factorial_small.yaml` | 2025-2034 | Four residual policies, 10 training seeds, eight fixed distribution shifts, paired product-level evaluation. | `outputs/monokan_final_distribution_shift_10seed` | SUPPORTING | Earlier project framing retained as an ablation, not the supervisor-preferred final direct-target formulation. Committed before base SHA `1bf315b`. |
 | Normalized rolling vs static MonoKAN | Does recomputing target stock from causal rolling history improve over a static episode target? | Rolling DeepGrid7 MonoKAN `4108.17`; static `4105.89` in one seed. | `configs/paper_lost_sales_rolling_direct_target_dev_1k_normalized.yaml`; `configs/paper_lost_sales_static_direct_target_dev_1k_normalized.yaml` | 2025 | 1,000 products, 200 epochs, normalized observations, matched products and demand paths. | `outputs/direct_target_dev_1k_normalized/seed_2025/full_200e` | DEVELOPMENT | One-seed matched development evidence. Rolling/vectorized implementation is in the cleanup implementation commit. |
 | Normalized rolling FCNN vs MonoKAN | Under identical normalized rolling direct-target semantics, how do FCNN and DeepGrid7 MonoKAN compare? | FCNN `4178.27 +/- 4.23`; DeepGrid7 MonoKAN `4108.48 +/- 5.90`. FCNN led by `69.78 +/- 1.70` reward/period. | `configs/paper_lost_sales_rolling_direct_target_dev_1k_normalized.yaml` | 2025, 2026, 2027 | Same 1k/200-epoch products, histories, economics, evaluation paths and direct-target decoder. | `outputs/direct_target_dev_1k_normalized/seed_2025/full_200e`; `seed_2026/full_200e`; `seed_2027/full_200e`; analysis in `outputs/direct_target_confirmation_3seed` | CANONICAL DEVELOPMENT | The FCNN advantage reproduced in all three seeds. Product generation and evaluation paths are fixed; initialization/training seeds vary. This is development-scale, not paper-scale evidence. |
-| Temporal MonoKAN | Do five causal temporal summaries help DeepGrid7 MonoKAN use rolling history? | Temporal MonoKAN `4135.64 +/- 9.08`; gain over baseline MonoKAN `27.16 +/- 5.62`. It closed `38.98% +/- 8.40%` of the FCNN gap but remained `42.63 +/- 6.47` below FCNN. | `configs/paper_lost_sales_rolling_direct_target_temporal_dev_1k_normalized.yaml` | 2025, 2026, 2027 | Controlled change from raw lags to 32 lags plus mean-32/8/4, population std-32 and OLS trend-8; 1,000 products and 200 epochs. | `outputs/direct_target_temporal_dev_1k_normalized/seed_2025/full_200e`; `seed_2026/full_200e`; `seed_2027/full_200e`; analysis in `outputs/direct_target_confirmation_3seed` | CANONICAL DEVELOPMENT | The temporal gain was positive in all three seeds (`+33.38`, `+22.44`, `+25.65`). This supports a reproducible development-scale representation benefit, not paper-scale superiority or parity with FCNN. |
+| Temporal MonoKAN | Do five causal temporal summaries help DeepGrid7 MonoKAN use rolling history? | Temporal MonoKAN `4135.64 +/- 9.08`; gain over baseline MonoKAN `27.16 +/- 5.62`. It closed `38.98% +/- 8.40%` of the FCNN gap but remained `42.63 +/- 6.47` below FCNN. | `configs/paper_lost_sales_rolling_direct_target_temporal_dev_1k_normalized.yaml` | 2025, 2026, 2027 | Controlled change from raw lags to 32 lags plus mean-32/8/4, population std-32 and OLS trend-8; 1,000 products and 200 epochs. | `outputs/direct_target_temporal_dev_1k_normalized/seed_2025/full_200e`; `seed_2026/full_200e`; `seed_2027/full_200e`; analysis in `outputs/direct_target_confirmation_3seed` | CANONICAL DEVELOPMENT | The temporal gain was positive in all three seeds (`+33.38`, `+22.44`, `+25.65`). This supports a reproducible development-scale representation benefit, not paper-scale superiority or parity with FCNN. The model is monotone in its configured expanded coordinates, but `std_32` and `trend_8` are unconstrained functions of the raw lags, so it is not globally monotone in the original demand-history coordinates. |
 | Raw-input normalization failure | Why did the first rolling/static DeepGrid7 experiment fail catastrophically? | Unnormalized observations were incompatible with spline grid `[-2, 4]`, causing extreme extrapolation; rewards are invalid for model comparison. | `configs/paper_lost_sales_rolling_direct_target_dev_1k.yaml`; `configs/paper_lost_sales_static_direct_target_dev_1k.yaml` | 2025 | 1,000 products, 200 epochs, `normalize_observations: false`. | `outputs/direct_target_dev_1k` | INVALID/DEBUG | Retained because saved metadata and regression tests reference these exact paths. See `docs/DEBUGGING.md`. |
 | Raw-action DeepGrid7 MonoKAN | Can a matched raw-action MonoKAN reproduce the raw FCNN anchor? | The full run was not completed; the only artifact is a one-epoch MPS timing estimate of about 37 hours for 1,000 epochs. | `configs/paper_lost_sales_raw_monokan_deepgrid7_5k.yaml` | None completed | Intended 5,000 products, 1,000 epochs, rolling raw action, DeepGrid7 MonoKAN. | `outputs/raw_monokan_deepgrid7_5k` | INCOMPLETE | Runner/config/tests are retained for provenance but are not part of the final core workflow. Base SHA `1bf315b`. |
 
@@ -44,8 +44,9 @@ The current core development comparison is:
 
 1. paper-style rolling raw-action FCNN as the reference anchor;
 2. direct-target FCNN;
-3. DeepGrid7 hard-monotone MonoKAN;
-4. temporal-feature DeepGrid7 MonoKAN;
+3. DeepGrid7 MonoKAN, hard-monotone in each configured raw-lag and economics coordinate;
+4. temporal-feature DeepGrid7 MonoKAN, hard-monotone only in its configured
+   expanded-feature coordinates;
 5. shared DirectBackprop, simulator, baselines and evaluation infrastructure.
 
 Compact/deep capacity, training scale, optimization budget, rolling/static,
@@ -62,3 +63,31 @@ their exact paths. Archive or consolidation should happen only after the final
 report and confirmation protocol are frozen.
 
 Implementation commit: `06553e3` (`feat: add direct-target capacity and rolling experiments`).
+
+## End-To-End Monotonicity Scope
+
+A read-only audit on the selected 2025--2027 checkpoints traced the deployed
+mapping through normalization, target scaling and the order-up-to decoder. The
+rolling policies use `S_t = m_0 r_theta(H_t, e)`, where `m_0` is the positive
+mean of the product's initial 32-demand history and remains fixed during the
+episode, followed by `q_t = max(S_t - I_t, 0)`.
+
+For baseline DeepGrid7 MonoKAN, the construction certifies nondecreasing target
+and order in every raw demand lag, selling price and lost-sales penalty;
+nonincreasing target and order in purchase and holding costs; and nonincreasing
+order in current inventory. Across three checkpoints, 300 existing validation
+products, six trajectory periods and three quantile perturbation spans, the
+audit found zero material violations. One of 518,400 raw-lag pairs differed by
+`0.000122` target/order units against a strict float32 tolerance of `0.0001`;
+the constrained edge-level maximum wrong increment was `2.98e-08`, so this is
+treated as numerical accumulation rather than a structural reversal.
+
+For temporal DeepGrid7 MonoKAN, the same economics and inventory guarantees
+remain certified. Raw-demand monotonicity does not: changing one original lag
+also changes unconstrained `std_32` and, for the latest eight lags, `trend_8`.
+The end-to-end audit observed target reversals in 194,507 of 518,400 pairs
+(`37.52%`) and final-order reversals in 194,494 pairs (`37.52%`), with a maximum
+reversal of `52.80` units. Therefore, temporal MonoKAN must not be described as
+globally monotone in original demand history even though its configured spline
+coordinates satisfy their constraints. This audit changes the scope of the
+structural claim, not the previously reported reward results.
