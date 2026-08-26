@@ -1,4 +1,4 @@
-"""Episode runners and policy evaluation loops."""
+"""Episode runners for reusable inventory environments."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from inventory_control.envs.lost_sales import LostSalesEnv
 from inventory_control.evaluation.metrics import compute_summary_metrics
 from inventory_control.policies.base import Policy
 

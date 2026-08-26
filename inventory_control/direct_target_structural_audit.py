@@ -16,7 +16,11 @@ from inventory_control.base_stock_output_experiment import _compact_settings, _m
 from inventory_control.paper_configs import load_paper_lost_sales_config
 from inventory_control.policies.neural.fcnn import compute_paper_fcnn_feature_stats, empirical_newsvendor_target_ratio
 from inventory_control.policies.neural.monokan import MonoKANPolicy, _evaluate_hermite_curves
-from inventory_control.policies.neural.registry import DIRECT_TARGET_STOCK_POLICY_NAMES, checkpoint_filenames
+from inventory_control.policies.neural.registry import (
+    CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES,
+    DIRECT_TARGET_STOCK_POLICY_NAMES,
+    checkpoint_filenames,
+)
 from inventory_control.products import PaperLostSalesProduct, PaperLostSalesProductGenerator
 from inventory_control.training.direct_backprop import (
     make_paper_lost_sales_training_batch,
@@ -47,7 +51,7 @@ def run_direct_target_structural_audit(
     config_path: str | Path,
     checkpoint_root: str | Path,
     output_dir: str | Path,
-    models: Sequence[str] = DIRECT_TARGET_STOCK_POLICY_NAMES,
+    models: Sequence[str] = (*DIRECT_TARGET_STOCK_POLICY_NAMES, *CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES),
     products_per_domain: int = 100,
 ) -> DirectTargetAuditArtifacts:
     """Audit complete targets and constrained splines without retraining."""

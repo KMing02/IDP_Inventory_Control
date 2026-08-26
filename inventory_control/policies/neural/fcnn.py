@@ -417,52 +417,6 @@ def make_paper_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Modu
     return model
 
 
-def make_paper_order_up_to_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Module:
-    """Build an FCNN that predicts a normalized order-up-to target."""
-    fcnn_defaults = config.get("fcnn", {})
-    source = metadata or fcnn_defaults
-    history_length = int(metadata.get("history_length_H", config["history_length_H"])) if metadata else int(config["history_length_H"])
-    history_feature_mode = str(source.get("paper_history_feature_mode", config.get("paper_history_feature_mode", "raw_lags")))
-    include_newsvendor_feature = bool(
-        source.get("paper_include_newsvendor_feature", config.get("paper_include_newsvendor_feature", False))
-    )
-    context_features = paper_context_feature_count(history_length, history_feature_mode, include_newsvendor_feature)
-    model = PaperContextMLPPolicy(
-        input_dim=context_features,
-        hidden_layers=int(source.get("hidden_layers", fcnn_defaults.get("hidden_layers", 2))),
-        hidden_units=int(source.get("hidden_units", fcnn_defaults.get("hidden_units", 32))),
-        activation=str(source.get("activation", fcnn_defaults.get("activation", "ELU"))),
-        output="positive",
-        output_upper_bound=float(source.get("max_order_factor", fcnn_defaults.get("max_order_factor", 4.0))),
-        output_logit_anchor_feature_index=context_features - 1 if include_newsvendor_feature else None,
-        output_logit_residual_scale=float(source.get("base_stock_logit_residual_scale", 1.0)),
-    )
-    model.paper_action_parameterization = "order_up_to"
-    model.paper_scale_target_by_history_mean = bool(source.get("scale_action_by_history_mean", True))
-    model.paper_history_feature_mode = history_feature_mode
-    model.paper_include_newsvendor_feature = include_newsvendor_feature
-    if include_newsvendor_feature or "initial_normalized_target" in source:
-        model.initialize_output_bias(float(source.get("initial_normalized_target", 1.0)))
-    return model
-
-
-def make_paper_base_stock_output_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Module:
-    """Build an FCNN base-stock-output policy with optional newsvendor bias init."""
-    return make_paper_order_up_to_fcnn_model(config, metadata=metadata)
-
-
-def make_paper_base_stock_output_fcnn_model_for_products(
-    config: dict,
-    products: Sequence[PaperLostSalesProduct],
-    feature_stats: PaperFCNNFeatureStats | None = None,
-    metadata: dict | None = None,
-) -> nn.Module:
-    """Build an FCNN base-stock policy initialized at the empirical newsvendor target."""
-    source = dict(metadata or config.get("fcnn", {}))
-    source["initial_normalized_target"] = empirical_newsvendor_target_ratio(products, feature_stats=feature_stats)
-    return make_paper_base_stock_output_fcnn_model(config, metadata=source)
-
-
 def make_paper_direct_target_stock_fcnn_model(
     config: dict,
     metadata: dict | None = None,
@@ -516,31 +470,6 @@ def make_paper_direct_target_stock_fcnn_model_for_products(
     source = dict(metadata or config.get("fcnn", {}))
     source["initial_normalized_target"] = empirical_newsvendor_target_ratio(products, feature_stats=feature_stats)
     return make_paper_direct_target_stock_fcnn_model(config, metadata=source)
-
-
-def make_paper_residual_order_up_to_fcnn_model(config: dict, metadata: dict | None = None) -> nn.Module:
-    """Build an FCNN that predicts a residual correction to historical base stock."""
-    source = metadata or config["fcnn"]
-    history_length = int(metadata.get("history_length_H", config["history_length_H"])) if metadata else int(config["history_length_H"])
-    history_feature_mode = str(source.get("paper_history_feature_mode", config.get("paper_history_feature_mode", "raw_lags")))
-    include_newsvendor_feature = bool(
-        source.get("paper_include_newsvendor_feature", config.get("paper_include_newsvendor_feature", False))
-    )
-    context_features = paper_context_feature_count(history_length, history_feature_mode, include_newsvendor_feature)
-    model = PaperContextMLPPolicy(
-        input_dim=context_features,
-        hidden_layers=int(source.get("hidden_layers", config["fcnn"]["hidden_layers"])),
-        hidden_units=int(source.get("hidden_units", config["fcnn"]["hidden_units"])),
-        activation=str(source.get("activation", config["fcnn"]["activation"])),
-        output="signed",
-    )
-    model.paper_action_parameterization = "residual_order_up_to"
-    model.paper_residual_scale = float(source.get("residual_scale", 0.5))
-    model.paper_residual_anchor = str(source.get("residual_anchor", "gamma"))
-    model.paper_history_feature_mode = history_feature_mode
-    model.paper_include_newsvendor_feature = include_newsvendor_feature
-    return model
-
 
 def build_paper_lost_sales_features(
     inventory: float,

@@ -46,8 +46,6 @@ SUPERVISED_TARGET_MODEL_NAMES = (
     "MonoKANDirectTargetStock",
     "KANDirectTargetStockDeepGrid7",
     "MonoKANDirectTargetStockDeepGrid7",
-    "KANDirectTargetStockDeepGrid10",
-    "MonoKANDirectTargetStockDeepGrid10",
 )
 
 
@@ -238,7 +236,7 @@ def run_supervised_target_diagnostic(
             "demand_scale": feature_stats.demand_scale,
             "price_scale": feature_stats.price_scale,
         },
-        "expanded_kan": {"hidden_layers": 2, "hidden_units": 16, "grids": [7, 10]},
+        "expanded_kan": {"hidden_layers": 2, "hidden_units": 16, "grids": [7]},
     }
     summary.to_csv(destination / "summary.csv", index=False)
     predictions.to_csv(destination / "predictions.csv", index=False)
@@ -280,8 +278,7 @@ def _make_diagnostic_model(
         "paper_history_feature_mode": history_feature_mode,
     }
     if "DeepGrid" in name:
-        metadata.update({"hidden_layers": 2, "hidden_units": 16})
-        metadata["grid"] = 7 if name.endswith("Grid7") else 10
+        metadata.update({"hidden_layers": 2, "hidden_units": 16, "grid": 7})
     if name == "PaperFCNNDirectTargetStock":
         return make_paper_direct_target_stock_fcnn_model(config, metadata=metadata)
     if name.startswith("KAN"):

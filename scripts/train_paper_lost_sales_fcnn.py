@@ -1,8 +1,4 @@
-"""Legacy raw-action FCNN training diagnostic.
-
-Prefer `scripts/run_idp_benchmark.py` with residual order-up-to models for new
-comparative experiments.
-"""
+"""Train the retained paper-style raw-action FCNN anchor."""
 
 from __future__ import annotations
 

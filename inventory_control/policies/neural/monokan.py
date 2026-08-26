@@ -447,110 +447,6 @@ class PaperMonoKANPolicyAdapter:
         return min(order, max(max_inventory_level - float(inventory), 0.0))
 
 
-def make_paper_monokan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
-    """Build the configured paper MonoKAN policy model."""
-    source = metadata or config.get("monokan", {})
-    history_length = int(source.get("history_length_H", config["history_length_H"]))
-    max_order_factor = float(
-        source.get(
-            "max_order_factor",
-            config.get("monokan", {}).get("max_order_factor", config.get("fcnn", {}).get("max_order_factor", 2.0)),
-        )
-    )
-    return MonoKANPolicy(
-        input_dim=1 + history_length + 4,
-        hidden_layers=int(source.get("hidden_layers", config.get("monokan", {}).get("hidden_layers", 1))),
-        hidden_units=int(source.get("hidden_units", config.get("monokan", {}).get("hidden_units", 16))),
-        grid=int(source.get("grid", config.get("monokan", {}).get("grid", 5))),
-        grid_range=tuple(source.get("grid_range", config.get("monokan", {}).get("grid_range", [-2.0, 4.0]))),
-        noise_scale=float(source.get("noise_scale", config.get("monokan", {}).get("noise_scale", 0.01))),
-        base_scale_init=_optional_float(source.get("base_scale_init", config.get("monokan", {}).get("base_scale_init"))),
-        spline_scale_init=_optional_float(source.get("spline_scale_init", config.get("monokan", {}).get("spline_scale_init"))),
-        bounded_base_scale_init=_optional_float(
-            source.get("bounded_base_scale_init", config.get("monokan", {}).get("bounded_base_scale_init"))
-        ),
-        bounded_spline_scale_init=float(
-            source.get("bounded_spline_scale_init", config.get("monokan", {}).get("bounded_spline_scale_init", 1.0))
-        ),
-        bounded_spline_slope_init=float(
-            source.get("bounded_spline_slope_init", config.get("monokan", {}).get("bounded_spline_slope_init", 1.0))
-        ),
-        monotonic_vars={0: -1},
-        initial_normalized_order=float(source.get("initial_normalized_order", 0.5 * max_order_factor)),
-        output_upper_bound=max_order_factor,
-    )
-
-
-def paper_raw_action_monotonic_vars(history_length: int) -> dict[int, int]:
-    """Return hard directions for canonical raw paper-policy features."""
-    history_length = int(history_length)
-    return {
-        0: -1,
-        **{index: 1 for index in range(1, history_length + 1)},
-        history_length + 1: 1,
-        history_length + 2: -1,
-        history_length + 3: -1,
-        history_length + 4: 1,
-    }
-
-
-def make_paper_deep_grid7_raw_action_monokan_model(
-    config: dict,
-    metadata: dict | None = None,
-) -> MonoKANPolicy:
-    """Build the frozen 37->16->16->1 raw-action DeepGrid7 MonoKAN."""
-    defaults = config.get("monokan", {})
-    source = metadata or defaults
-    history_length = int(source.get("history_length_H", config["history_length_H"]))
-    model = MonoKANPolicy(
-        input_dim=1 + history_length + 4,
-        hidden_layers=2,
-        hidden_units=16,
-        grid=7,
-        grid_range=tuple(source.get("grid_range", defaults.get("grid_range", [-2.0, 4.0]))),
-        noise_scale=float(source.get("noise_scale", defaults.get("noise_scale", 0.01))),
-        base_scale_init=_optional_float(source.get("base_scale_init", defaults.get("base_scale_init"))),
-        spline_scale_init=_optional_float(source.get("spline_scale_init", defaults.get("spline_scale_init"))),
-        monotonic_vars=paper_raw_action_monotonic_vars(history_length),
-        initial_normalized_order=float(source.get("initial_normalized_order", 0.5)),
-        output_upper_bound=None,
-    )
-    model.paper_action_parameterization = "raw"
-    model.paper_history_feature_mode = "raw_lags"
-    model.paper_roll_history = True
-    model.paper_enforce_action_cap = False
-    model.paper_scale_action_by_history_mean = False
-    model.paper_architecture = "raw_action_deepgrid7"
-    return model
-
-
-def make_paper_order_up_to_monokan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
-    """Build a MonoKAN model that predicts a normalized order-up-to target."""
-    return _make_paper_base_stock_output_kan_model(config, metadata=metadata, monotonic_vars={}, use_logit_residual=False)
-
-
-def make_paper_base_stock_output_kan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
-    """Build an unconstrained KAN base-stock-output policy."""
-    return _make_paper_base_stock_output_kan_model(config, metadata=metadata, monotonic_vars={}, use_logit_residual=True)
-
-
-def make_paper_base_stock_output_monokan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
-    """Build a MonoKAN base-stock-output policy with context comparative statics."""
-    return _make_paper_base_stock_output_kan_model(config, metadata=metadata, monotonic_vars="context", use_logit_residual=True)
-
-
-def make_paper_base_stock_output_monokan_model_for_products(
-    config: dict,
-    products: Sequence[PaperLostSalesProduct],
-    feature_stats: PaperFCNNFeatureStats | None = None,
-    metadata: dict | None = None,
-) -> MonoKANPolicy:
-    """Build a MonoKAN base-stock policy initialized at the empirical newsvendor target."""
-    source = dict(metadata or config.get("monokan", {}))
-    source["initial_normalized_target"] = empirical_newsvendor_target_ratio(products, feature_stats=feature_stats)
-    return make_paper_base_stock_output_monokan_model(config, metadata=source)
-
-
 def make_paper_direct_target_stock_kan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
     """Build an unconstrained KAN that directly predicts a positive target-stock ratio."""
     return _make_paper_direct_target_stock_kan_model(config, metadata=metadata, monotonic_vars={})
@@ -579,52 +475,6 @@ def make_paper_deep_grid7_direct_target_stock_monokan_model(
     source = dict(metadata or config.get("monokan", {}))
     source.update({"hidden_layers": 2, "hidden_units": 16, "grid": 7})
     return make_paper_direct_target_stock_monokan_model(config, metadata=source)
-
-
-def make_paper_selective_direct_target_stock_kan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
-    """Build an unconstrained KAN with the explicit demand-level feature used by selective MonoKAN."""
-    return _make_paper_direct_target_stock_kan_model(config, metadata=metadata, monotonic_vars="selective_context")
-
-
-def make_paper_selective_direct_target_stock_monokan_model(
-    config: dict,
-    metadata: dict | None = None,
-) -> MonoKANPolicy:
-    """Constrain demand level and economics while leaving individual raw lags unconstrained."""
-    return _make_paper_direct_target_stock_kan_model(config, metadata=metadata, monotonic_vars="selective_context_monotone")
-
-
-def make_paper_selective_direct_target_stock_monokan_model_for_products(
-    config: dict,
-    products: Sequence[PaperLostSalesProduct],
-    feature_stats: PaperFCNNFeatureStats,
-    metadata: dict | None = None,
-) -> MonoKANPolicy:
-    """Calibrate selective MonoKAN's open readout on observable training contexts."""
-    source = dict(metadata or config.get("monokan", {}))
-    initial_target = empirical_newsvendor_target_ratio(products, feature_stats=feature_stats)
-    source["initial_normalized_target"] = initial_target
-    model = make_paper_selective_direct_target_stock_monokan_model(config, metadata=source)
-    contexts = torch.tensor(
-        [
-            build_paper_lost_sales_features(
-                inventory=0.0,
-                historical_demand=product.historical_demand,
-                price=product.price,
-                purchase_cost=product.purchase_cost,
-                holding_cost=product.holding_cost,
-                lost_sale_penalty=product.lost_sale_penalty,
-                feature_stats=feature_stats,
-                history_feature_mode=str(model.paper_history_feature_mode),
-                include_demand_level_feature=True,
-            )[1:]
-            for product in products
-        ],
-        dtype=torch.float32,
-    )
-    model.initialize_open_output(initial_target, reference_contexts=contexts)
-    model.paper_initialization_mode = "empirical_newsvendor_open_readout_selective_context"
-    return model
 
 
 def make_paper_direct_target_stock_monokan_model_for_products(
@@ -689,21 +539,9 @@ def _make_paper_direct_target_stock_kan_model(
         source.get("paper_history_feature_mode", config.get("paper_history_feature_mode", "raw_lags"))
     )
     history_features = paper_history_feature_count(history_length, history_feature_mode)
-    include_demand_level_feature = isinstance(monotonic_vars, str) and monotonic_vars in {
-        "selective_context",
-        "selective_context_monotone",
-    }
-    context_features = paper_context_feature_count(
-        history_length,
-        history_feature_mode,
-        include_demand_level_feature=include_demand_level_feature,
-    )
+    context_features = paper_context_feature_count(history_length, history_feature_mode)
     if monotonic_vars == "context":
         resolved_monotonic_vars = _paper_context_monotonic_vars(history_features, history_feature_mode)
-    elif monotonic_vars == "selective_context_monotone":
-        resolved_monotonic_vars = _paper_selective_context_monotonic_vars(history_features)
-    elif monotonic_vars == "selective_context":
-        resolved_monotonic_vars = {}
     else:
         resolved_monotonic_vars = dict(monotonic_vars)
     initial_target = float(source.get("initial_normalized_target", 1.0))
@@ -732,131 +570,10 @@ def _make_paper_direct_target_stock_kan_model(
     model.paper_scale_target_by_history_mean = True
     model.paper_history_feature_mode = history_feature_mode
     model.paper_include_newsvendor_feature = False
-    model.paper_include_demand_level_feature = include_demand_level_feature
+    model.paper_include_demand_level_feature = False
     model.paper_enforce_action_cap = False
     model.paper_initialization_mode = initialization_mode
     model.paper_roll_history = bool(source.get("roll_history", False))
-    return model
-
-
-def _make_paper_base_stock_output_kan_model(
-    config: dict,
-    monotonic_vars: dict[int, int] | str,
-    metadata: dict | None = None,
-    use_logit_residual: bool = False,
-) -> MonoKANPolicy:
-    """Build a direct base-stock-output KAN model with optional monotonic constraints."""
-    source = metadata or config.get("monokan", {})
-    history_length = int(source.get("history_length_H", config["history_length_H"]))
-    history_feature_mode = str(source.get("paper_history_feature_mode", config.get("paper_history_feature_mode", "raw_lags")))
-    include_newsvendor_feature = bool(
-        source.get("paper_include_newsvendor_feature", config.get("paper_include_newsvendor_feature", False))
-    )
-    history_features = paper_history_feature_count(history_length, history_feature_mode)
-    context_features = paper_context_feature_count(history_length, history_feature_mode, include_newsvendor_feature)
-    resolved_monotonic_vars = (
-        _paper_context_monotonic_vars(history_features, history_feature_mode, include_newsvendor_feature)
-        if monotonic_vars == "context"
-        else dict(monotonic_vars)
-    )
-    max_order_factor = float(
-        source.get(
-            "max_order_factor",
-            config.get("monokan", {}).get("max_order_factor", config.get("fcnn", {}).get("max_order_factor", 2.0)),
-        )
-    )
-    initial_target = float(source.get("initial_normalized_target", 0.5 * max_order_factor))
-    target_fraction = min(max(initial_target / max_order_factor, 1e-6), 1.0 - 1e-6)
-    output_logit_anchor = torch.logit(torch.tensor(target_fraction)).item() if use_logit_residual else None
-    model = MonoKANPolicy(
-        input_dim=context_features,
-        hidden_layers=int(source.get("hidden_layers", config.get("monokan", {}).get("hidden_layers", 1))),
-        hidden_units=int(source.get("hidden_units", config.get("monokan", {}).get("hidden_units", 16))),
-        grid=int(source.get("grid", config.get("monokan", {}).get("grid", 5))),
-        grid_range=tuple(source.get("grid_range", config.get("monokan", {}).get("grid_range", [-2.0, 4.0]))),
-        noise_scale=float(source.get("noise_scale", config.get("monokan", {}).get("noise_scale", 0.01))),
-        base_scale_init=_optional_float(source.get("base_scale_init", config.get("monokan", {}).get("base_scale_init"))),
-        spline_scale_init=_optional_float(source.get("spline_scale_init", config.get("monokan", {}).get("spline_scale_init"))),
-        bounded_base_scale_init=_optional_float(
-            source.get("bounded_base_scale_init", config.get("monokan", {}).get("bounded_base_scale_init"))
-        ),
-        bounded_spline_scale_init=float(
-            source.get("bounded_spline_scale_init", config.get("monokan", {}).get("bounded_spline_scale_init", 1.0))
-        ),
-        bounded_spline_slope_init=float(
-            source.get("bounded_spline_slope_init", config.get("monokan", {}).get("bounded_spline_slope_init", 1.0))
-        ),
-        monotonic_vars=resolved_monotonic_vars,
-        initial_normalized_order=initial_target,
-        output_upper_bound=max_order_factor,
-        output_logit_anchor=output_logit_anchor,
-        output_logit_anchor_feature_index=context_features - 1 if use_logit_residual and include_newsvendor_feature else None,
-        output_logit_residual_scale=float(source.get("base_stock_logit_residual_scale", 0.25)) if use_logit_residual else 1.0,
-    )
-    model.paper_action_parameterization = "order_up_to"
-    model.paper_scale_target_by_history_mean = bool(source.get("scale_action_by_history_mean", True))
-    model.paper_history_feature_mode = history_feature_mode
-    model.paper_include_newsvendor_feature = include_newsvendor_feature
-    return model
-
-
-def make_paper_residual_order_up_to_monokan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
-    """Build a MonoKAN model that predicts a residual over historical base stock."""
-    return _make_paper_residual_order_up_to_kan_model(config, metadata=metadata, monotonic_vars="context")
-
-
-def make_paper_residual_order_up_to_kan_model(config: dict, metadata: dict | None = None) -> MonoKANPolicy:
-    """Build an unconstrained KAN residual model for MONOkan ablations."""
-    return _make_paper_residual_order_up_to_kan_model(config, metadata=metadata, monotonic_vars={})
-
-
-def _make_paper_residual_order_up_to_kan_model(
-    config: dict,
-    monotonic_vars: dict[int, int] | str,
-    metadata: dict | None = None,
-) -> MonoKANPolicy:
-    """Build a residual order-up-to KAN model with optional monotonic constraints."""
-    source = metadata or config.get("monokan", {})
-    history_length = int(source.get("history_length_H", config["history_length_H"]))
-    history_feature_mode = str(source.get("paper_history_feature_mode", config.get("paper_history_feature_mode", "raw_lags")))
-    include_newsvendor_feature = bool(
-        source.get("paper_include_newsvendor_feature", config.get("paper_include_newsvendor_feature", False))
-    )
-    history_features = paper_history_feature_count(history_length, history_feature_mode)
-    context_features = paper_context_feature_count(history_length, history_feature_mode, include_newsvendor_feature)
-    resolved_monotonic_vars = (
-        _paper_context_monotonic_vars(history_features, history_feature_mode, include_newsvendor_feature)
-        if monotonic_vars == "context"
-        else dict(monotonic_vars)
-    )
-    model = MonoKANPolicy(
-        input_dim=context_features,
-        hidden_layers=int(source.get("hidden_layers", config.get("monokan", {}).get("hidden_layers", 1))),
-        hidden_units=int(source.get("hidden_units", config.get("monokan", {}).get("hidden_units", 16))),
-        grid=int(source.get("grid", config.get("monokan", {}).get("grid", 5))),
-        grid_range=tuple(source.get("grid_range", config.get("monokan", {}).get("grid_range", [-2.0, 4.0]))),
-        noise_scale=float(source.get("noise_scale", config.get("monokan", {}).get("noise_scale", 0.01))),
-        base_scale_init=_optional_float(source.get("base_scale_init", config.get("monokan", {}).get("base_scale_init"))),
-        spline_scale_init=_optional_float(source.get("spline_scale_init", config.get("monokan", {}).get("spline_scale_init"))),
-        bounded_base_scale_init=_optional_float(
-            source.get("bounded_base_scale_init", config.get("monokan", {}).get("bounded_base_scale_init"))
-        ),
-        bounded_spline_scale_init=float(
-            source.get("bounded_spline_scale_init", config.get("monokan", {}).get("bounded_spline_scale_init", 1.0))
-        ),
-        bounded_spline_slope_init=float(
-            source.get("bounded_spline_slope_init", config.get("monokan", {}).get("bounded_spline_slope_init", 1.0))
-        ),
-        monotonic_vars=resolved_monotonic_vars,
-        initial_normalized_order=float(source.get("initial_residual_center", 1.0)),
-        output_upper_bound=2.0,
-    )
-    model.paper_action_parameterization = "residual_order_up_to"
-    model.paper_residual_center = 1.0
-    model.paper_residual_scale = float(source.get("residual_scale", 0.5))
-    model.paper_residual_anchor = str(source.get("residual_anchor", "gamma"))
-    model.paper_history_feature_mode = history_feature_mode
-    model.paper_include_newsvendor_feature = include_newsvendor_feature
     return model
 
 
@@ -891,18 +608,6 @@ def _paper_context_monotonic_vars(
     if include_newsvendor_feature:
         directions[int(history_length) + 4] = 1
     return directions
-
-
-def _paper_selective_context_monotonic_vars(history_features: int) -> dict[int, int]:
-    """Constrain an explicit demand-level summary and economics, not individual demand lags."""
-    demand_level_index = int(history_features)
-    return {
-        demand_level_index: 1,
-        demand_level_index + 1: 1,
-        demand_level_index + 2: -1,
-        demand_level_index + 3: -1,
-        demand_level_index + 4: 1,
-    }
 
 
 def _optional_float(value) -> float | None:

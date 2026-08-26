@@ -26,30 +26,23 @@ from inventory_control.paper_lost_sales import (
     omniscient_gamma_base_stock_policy,
     paper_evaluation_demand_path,
 )
+from inventory_control.evaluation.torch_policy import batched_torch_policy_metrics
 from inventory_control.policies.neural.fcnn import (
     PaperFCNNFeatureStats,
     compute_paper_fcnn_feature_stats,
     empirical_newsvendor_target_ratio,
-    make_paper_base_stock_output_fcnn_model_for_products,
     make_paper_direct_target_stock_fcnn_model_for_products,
 )
 from inventory_control.policies.neural.monokan import (
-    make_paper_base_stock_output_monokan_model_for_products,
-    make_paper_base_stock_output_kan_model,
     make_paper_direct_target_stock_kan_model,
     make_paper_direct_target_stock_monokan_model_for_products,
     make_paper_deep_grid7_direct_target_stock_kan_model,
     make_paper_deep_grid7_direct_target_stock_monokan_model_for_products,
-    make_paper_selective_direct_target_stock_kan_model,
-    make_paper_selective_direct_target_stock_monokan_model,
-    make_paper_selective_direct_target_stock_monokan_model_for_products,
 )
 from inventory_control.policies.neural.registry import (
-    BASE_STOCK_OUTPUT_POLICY_NAMES,
     CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES,
     DIRECT_TARGET_STOCK_POLICY_NAMES,
     POLICY_SPECS_BY_NAME,
-    SELECTIVE_DIRECT_TARGET_STOCK_POLICY_NAMES,
 )
 from inventory_control.products import PaperLostSalesProduct, PaperLostSalesProductGenerator
 from inventory_control.training.direct_backprop import DirectBackpropResult, train_paper_lost_sales_fcnn
@@ -70,19 +63,14 @@ class BaseStockOutputArtifacts:
 def run_base_stock_output_experiment(
     config_path: str | Path = "configs/paper_lost_sales_debug.yaml",
     output_dir: str | Path = "outputs/base_stock_output_smoke",
-    models: tuple[str, ...] = BASE_STOCK_OUTPUT_POLICY_NAMES,
+    models: tuple[str, ...] = DIRECT_TARGET_STOCK_POLICY_NAMES,
     device: str | None = None,
     seed: int | None = None,
     activation_checkpointing: bool = True,
     shared_training_seed: bool = False,
 ) -> BaseStockOutputArtifacts:
     """Run a no-imitation direct base-stock-output comparison."""
-    supported_models = (
-        set(BASE_STOCK_OUTPUT_POLICY_NAMES)
-        | set(DIRECT_TARGET_STOCK_POLICY_NAMES)
-        | set(SELECTIVE_DIRECT_TARGET_STOCK_POLICY_NAMES)
-        | set(CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES)
-    )
+    supported_models = set(DIRECT_TARGET_STOCK_POLICY_NAMES) | set(CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES)
     unknown = sorted(set(models) - supported_models)
     if unknown:
         raise ValueError(f"unsupported base-stock-output models: {unknown}")
@@ -203,7 +191,7 @@ def run_base_stock_output_experiment(
         "config_path": str(config_path),
         "settings": settings,
         "models": list(models),
-        "action_parameterization": "NN(z)->S_theta, q=max(S_theta-inventory,0)",
+        "action_parameterization": "r_theta=softplus(model(z)); S_t=m_0*r_theta; q_t=max(S_t-I_t,0)",
         "paper_history_feature_mode": settings["paper_history_feature_mode"],
         "paper_include_newsvendor_feature": settings["paper_include_newsvendor_feature"],
         "include_terminal_salvage": settings["include_terminal_salvage"],
@@ -214,7 +202,7 @@ def run_base_stock_output_experiment(
         "imitation_pretraining": False,
         "activation_checkpointing": bool(activation_checkpointing),
         "shared_training_seed": bool(shared_training_seed),
-        "pure_direct_target_stock_models": list(DIRECT_TARGET_STOCK_POLICY_NAMES),
+        "direct_target_stock_models": list(DIRECT_TARGET_STOCK_POLICY_NAMES),
         "capacity_comparison_models": list(CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES),
     }
 
@@ -266,14 +254,6 @@ def _make_model(
     feature_stats: PaperFCNNFeatureStats,
     initial_target_ratio: float,
 ) -> nn.Module:
-    if name == "PaperFCNNBaseStockOrderUpTo":
-        return make_paper_base_stock_output_fcnn_model_for_products(config, train_products, feature_stats=feature_stats)
-    if name == "KANBaseStockOrderUpTo":
-        metadata = dict(config.get("monokan", {}))
-        metadata["initial_normalized_target"] = initial_target_ratio
-        return make_paper_base_stock_output_kan_model(config, metadata=metadata)
-    if name == "MonoKANBaseStockOrderUpTo":
-        return make_paper_base_stock_output_monokan_model_for_products(config, train_products, feature_stats=feature_stats)
     if name == "PaperFCNNDirectTargetStock":
         return make_paper_direct_target_stock_fcnn_model_for_products(
             config,
@@ -286,17 +266,6 @@ def _make_model(
         if name == "KANDirectTargetStock":
             return make_paper_direct_target_stock_kan_model(config, metadata=metadata)
         return make_paper_direct_target_stock_monokan_model_for_products(
-            config,
-            train_products,
-            feature_stats,
-            metadata=metadata,
-        )
-    if name in SELECTIVE_DIRECT_TARGET_STOCK_POLICY_NAMES:
-        metadata = dict(config.get("monokan", {}))
-        metadata["initial_normalized_target"] = initial_target_ratio
-        if name == "KANSelectiveDirectTargetStock":
-            return make_paper_selective_direct_target_stock_kan_model(config, metadata=metadata)
-        return make_paper_selective_direct_target_stock_monokan_model_for_products(
             config,
             train_products,
             feature_stats,
@@ -330,14 +299,12 @@ def _evaluate_model(
         and not getattr(model, "paper_include_demand_level_feature", False)
     )
     if use_batched_evaluation:
-        from inventory_control.idp_benchmark import _batched_torch_policy_metrics
-
         batch_settings = {
             **settings,
             "scale_action_by_history_mean": False,
             "enforce_action_cap": bool(getattr(model, "paper_enforce_action_cap", True)),
         }
-        metrics = _batched_torch_policy_metrics(products, model, feature_stats, batch_settings, "validation")
+        metrics = batched_torch_policy_metrics(products, model, feature_stats, batch_settings, "validation")
         rows = [
             _product_metric_row(
                 metrics.iloc[index].to_dict(),

@@ -1,8 +1,4 @@
-"""Legacy raw-action FCNN checkpoint evaluator.
-
-Prefer `scripts/run_idp_benchmark.py` for residual order-up-to comparisons and
-shared output schemas.
-"""
+"""Evaluate the retained paper-style raw-action FCNN anchor."""
 
 from __future__ import annotations
 
