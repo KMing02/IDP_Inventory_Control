@@ -1,12 +1,12 @@
 # Structure-Informed Neural Inventory Control Benchmark
 
-This repository is a research codebase for structure-informed neural inventory control. The current primary workflow compares residual order-up-to neural policies for a paper-style lost-sales benchmark.
+This repository is a research codebase for structure-informed neural inventory control. The current primary development workflow compares paper-style raw-action FCNN behavior with direct target-stock neural policies for a paper-style lost-sales benchmark.
 
 This is not a generic reinforcement learning benchmark. The intended training direction is DirectBackprop-style differentiable policy optimization through inventory simulators, where domain structure is injected through inventory balance equations, lead-time pipeline states, monotonicity of order quantities with respect to inventory position, and classical heuristic baselines.
 
 The current priority is replicating the lost-sales setting from Maggiar et al. (2025), "Structure-Informed Deep Reinforcement Learning for Inventory Management". Generic benchmark scenarios remain in the repository, but they are secondary until the lost-sales replication is stable.
 
-The current implementation includes clean simulators, demand processes, heuristic baselines, paper-style lost-sales product generation, DirectBackprop training, residual order-up-to policy decoders, structural diagnostics, distribution-shift evaluation, plotting, and tests.
+The current implementation includes clean simulators, demand processes, heuristic baselines, paper-style lost-sales product generation, DirectBackprop training, direct target-stock policies, residual order-up-to policy decoders, structural diagnostics, distribution-shift evaluation, plotting, and tests.
 
 ## Project Status
 
@@ -14,8 +14,9 @@ Current status:
 
 - Core single-item lost-sales simulators are implemented and tested.
 - Paper-style no-lead-time lost-sales product generation, reward evaluation, base-stock baselines, and DirectBackprop training are implemented.
-- The primary neural workflow uses a historical base-stock anchor plus a learned residual target-stock correction.
-- The primary four-model comparison is `PaperFCNNResidualOrderUpTo`, `KANResidualOrderUpTo`, `ConstrainedMLPResidualOrderUpTo`, and `MonoKANResidualOrderUpTo`.
+- The current main evidence compares a paper-style rolling raw-action FCNN anchor with rolling direct target-stock FCNN and DeepGrid7 MonoKAN policies.
+- The direct target-stock policy predicts `S_t` and deploys `q_t = max(S_t - I_t, 0)`.
+- The older residual order-up-to workflow remains implemented and documented as a supporting ablation, not the current final framing.
 - Target-stock monotonicity diagnostics, MonoKAN spline certification, and distribution-shift evaluation are available.
 - Evaluation is comparable across policies using the same products, demand paths, seeds, horizon, and burn-in.
 
@@ -23,14 +24,17 @@ Current limitations:
 
 - Paper lost-sales product generation follows Table 1 of Maggiar et al. for the synthetic LS setting, and neural policies use the current observable feature pipeline.
 - `OmniscientOptimal` is the exact Gamma critical-quantile base-stock benchmark and uses hidden true demand parameters.
-- Current residual MONOkan evidence is diagnostic, not a full paper replication or statistically established robustness result.
+- Current MonoKAN evidence is development-scale and behavioral; it is not a full paper replication or statistically established robustness result.
+- Temporal-feature MonoKAN is a reward-improving secondary ablation, but it is not globally monotone with respect to original raw demand lags.
 - Raw-action FCNN and raw-action MonoKAN scripts remain as legacy diagnostics; they are not the primary workflow.
 - Multi-echelon, perishability, and procurement-removal settings are not implemented yet.
 - Generated outputs and model checkpoints are intentionally ignored by Git and are not required for tests.
 
 See also:
 
-- `docs/ARCHITECTURE.md` for module boundaries and the residual policy API.
+- `docs/EXPERIMENTS.md` for the current experiment index, provenance, and which outputs are canonical development evidence.
+- `docs/DEBUGGING.md` for major resolved implementation issues and invalid/debug outputs.
+- `docs/ARCHITECTURE.md` for module boundaries and reusable policy APIs.
 - `docs/TEAM_WORKFLOW.md` for branch, test, and pull-request expectations.
 - `docs/MONOKAN_METHOD_EVIDENCE.md` for current MONOkan evidence and limitations.
 
@@ -130,7 +134,7 @@ python scripts/run_quick_smoke_test.py
 
 This command generates a tiny paper-style product set, evaluates historical/oracle base-stock baselines, trains a miniature FCNN for a few epochs, and evaluates it. It does not require any pre-existing files in `outputs/`.
 
-Run a tiny comparable residual benchmark:
+Run a tiny comparable residual benchmark for the supporting residual workflow:
 
 ```bash
 python scripts/run_idp_benchmark.py --mode structure-ls --profile compact --config configs/paper_lost_sales_debug.yaml --models PaperFCNNResidualOrderUpTo,ConstrainedMLPResidualOrderUpTo,MonoKANResidualOrderUpTo --output-dir outputs/idp_benchmark/residual_smoke
@@ -150,7 +154,7 @@ python scripts/run_quick_smoke_test.py
 python scripts/run_idp_benchmark.py --mode structure-ls --profile compact --config configs/paper_lost_sales_debug.yaml --models PaperFCNNResidualOrderUpTo,ConstrainedMLPResidualOrderUpTo,MonoKANResidualOrderUpTo --output-dir outputs/idp_benchmark/residual_smoke
 ```
 
-Older raw-action training/evaluation scripts are retained for diagnostics and historical comparison. Prefer `scripts/run_idp_benchmark.py` for new residual order-up-to experiments.
+Older raw-action and residual training/evaluation scripts are retained for diagnostics and historical comparison. For the current direct target-stock evidence, start from `docs/EXPERIMENTS.md` and the `scripts/run_base_stock_output_experiment.py` and `scripts/run_rolling_direct_target_matched.py` entry points.
 
 The evaluation scripts default to the validation split. The held-out test split should be used only for the final report:
 
@@ -352,7 +356,9 @@ outputs/plots/paper_lost_sales_policy_structure.png
 ```
 
 This raw-action analysis is retained for historical diagnostics. The main
-current evaluation focus is the residual order-up-to workflow below. Dual
+current evaluation focus is the direct target-stock workflow indexed in
+`docs/EXPERIMENTS.md`; the residual order-up-to workflow below is a supporting
+ablation. Dual
 sourcing, perishability, and procurement-removal are later paper-setting
 extensions.
 
@@ -373,8 +379,8 @@ outputs/results/paper_lost_sales_fcnn_worst_cases_validation.csv
 
 The IDP benchmark is LS-first and paper-aligned. It starts with the no-lead-time
 lost-sales setting from Maggiar et al. before considering any extensions. The
-current primary workflow is a residual order-up-to comparison with a historical
-base-stock anchor.
+residual order-up-to workflow is retained as a structured ablation with a
+historical base-stock anchor.
 
 Primary residual order-up-to policies:
 

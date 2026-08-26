@@ -1,10 +1,12 @@
 # Frozen Experiment Protocol
 
-Status: frozen for the next final evaluation run. Do not tune model classes,
+Status: superseded historical draft. The current experiment inventory and development evidence are indexed in `docs/EXPERIMENTS.md`. This file records the earlier residual order-up-to final-run proposal and should not be treated as the active final protocol unless the team explicitly returns to the residual framing.
+
+Historical status: frozen for the earlier residual final evaluation run. Do not tune model classes,
 training schedules, seeds, shift definitions, equivalence margin, or analysis
 logic after viewing final outputs.
 
-## Models
+## Historical Residual Models
 
 - `PaperFCNNResidualOrderUpTo`
 - `KANResidualOrderUpTo`
@@ -83,7 +85,7 @@ capacity guards, training schedules, seeds, shift definitions, model-selection
 rules, or analysis logic. If a concrete correctness bug is discovered, document
 the bug and rerun only after recording the invalidated run.
 
-## Final Run Commands
+## Historical Residual Final Run Commands
 
 Primary final four-model benchmark:
 
