@@ -27,5 +27,8 @@ initial target stocks, finite gradients, and stable training behavior:
 - `outputs/direct_target_dev_1k_normalized`
 - `outputs/direct_target_temporal_dev_1k_normalized`
 
-The raw and normalized config paths remain in place because saved metadata and
-regression tests reference them directly.
+The invalid raw-input experiment is documented here as historical debugging
+evidence. Its raw unnormalized configs were intentionally removed from the
+final-report working tree during cleanup; provenance remains available through
+Git history and the documented experiment records. The normalized controls
+above remain the report-facing evidence.

@@ -39,6 +39,13 @@ The baseline DeepGrid7 MonoKAN is the final certified monotone model. Its end-to
 
 The temporal MonoKAN is not globally monotone in the original raw demand-history coordinates. The temporal summaries improve reward, but `std_32` and `trend_8` are unconstrained functions of the original demand lags; the audit observed about `37.52%` raw-demand monotonicity reversals for that variant.
 
+The complete end-to-end structural audit is reproducible from the retained
+selected checkpoints with `scripts/run_direct_target_structural_audit.py` and
+`inventory_control.direct_target_structural_audit`. No canonical
+structural-audit output directory is currently stored under `outputs/`; if exact
+detailed tables are needed, regenerate them from the retained checkpoints
+rather than relying on a preexisting output path.
+
 ## Outputs Not Deleted Yet
 
 The following output roots are tied only to branches removed from the current code path and are safe to delete after the final report and presentation no longer need historical cross-checks:
