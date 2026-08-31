@@ -39,9 +39,13 @@ from inventory_control.policies.neural.monokan import (
     make_paper_deep_grid7_direct_target_stock_kan_model,
     make_paper_deep_grid7_direct_target_stock_monokan_model_for_products,
 )
+from inventory_control.policies.neural.monokan import (
+    make_paper_soft_quantile_target_stock_monokan_model_for_products,
+)
 from inventory_control.policies.neural.registry import (
     CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES,
     DIRECT_TARGET_STOCK_POLICY_NAMES,
+    STRUCTURED_TARGET_STOCK_POLICY_NAMES,
     POLICY_SPECS_BY_NAME,
 )
 from inventory_control.products import PaperLostSalesProduct, PaperLostSalesProductGenerator
@@ -70,7 +74,11 @@ def run_base_stock_output_experiment(
     shared_training_seed: bool = False,
 ) -> BaseStockOutputArtifacts:
     """Run a no-imitation direct base-stock-output comparison."""
-    supported_models = set(DIRECT_TARGET_STOCK_POLICY_NAMES) | set(CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES)
+    supported_models = (
+        set(DIRECT_TARGET_STOCK_POLICY_NAMES)
+        | set(CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES)
+        | set(STRUCTURED_TARGET_STOCK_POLICY_NAMES)
+    )
     unknown = sorted(set(models) - supported_models)
     if unknown:
         raise ValueError(f"unsupported base-stock-output models: {unknown}")
@@ -117,12 +125,13 @@ def run_base_stock_output_experiment(
             epochs=settings["reward_epochs"],
             learning_rate=settings["learning_rate"],
             seed=training_seed,
-            imitation_epochs=0,
+            imitation_epochs=settings["imitation_epochs"],
             validation_products=validation_products,
             validation_interval=settings["validation_interval"],
             feature_stats=feature_stats,
             max_order_factor=settings["max_order_factor"],
             normalize_reward_loss=settings["normalize_reward_loss"],
+            per_product_reward_weighting=settings["per_product_reward_weighting"],
             training_demand_mode=settings["training_demand_mode"],
             history_feature_mode=settings["paper_history_feature_mode"],
             include_newsvendor_feature=include_newsvendor_feature,
@@ -153,7 +162,7 @@ def run_base_stock_output_experiment(
                 **_mean_metrics(product_metrics.to_dict("records")),
                 **_target_summary(target_diagnostic),
                 "training_epochs": settings["reward_epochs"],
-                "imitation_epochs": 0,
+                "imitation_epochs": settings["imitation_epochs"],
                 "initial_target_ratio": initial_target_ratio,
                 "parameter_count": _parameter_count(model),
                 "training_seconds": result.elapsed_seconds,
@@ -199,7 +208,7 @@ def run_base_stock_output_experiment(
         "normalize_observations": settings["normalize_observations"],
         "rolling_history": rolling_history_by_model,
         "initialization": "final output initialized near empirical newsvendor target ratio",
-        "imitation_pretraining": False,
+        "imitation_pretraining": settings["imitation_epochs"] > 0,
         "activation_checkpointing": bool(activation_checkpointing),
         "shared_training_seed": bool(shared_training_seed),
         "direct_target_stock_models": list(DIRECT_TARGET_STOCK_POLICY_NAMES),
@@ -230,6 +239,11 @@ def _compact_settings(config: dict[str, Any]) -> dict[str, Any]:
         "burn_in": int(compact.get("burn_in", config.get("burn_in", 0))),
         "max_order_factor": float(benchmark.get("max_order_factor", config.get("fcnn", {}).get("max_order_factor", 4.0))),
         "normalize_reward_loss": bool(benchmark.get("normalize_reward_loss", True)),
+        "per_product_reward_weighting": bool(benchmark.get("per_product_reward_weighting", False)),
+        # Distinct from compact.imitation_epochs, which several retained configs
+        # already set. The direct-target protocol is defined as reward-only, so a
+        # warm start has to be requested explicitly and never inherited.
+        "imitation_epochs": int(benchmark.get("imitation_warm_start_epochs", 0)),
         "include_terminal_salvage": bool(
             benchmark.get("include_terminal_salvage", config.get("include_terminal_salvage", True))
         ),
@@ -266,6 +280,14 @@ def _make_model(
         if name == "KANDirectTargetStock":
             return make_paper_direct_target_stock_kan_model(config, metadata=metadata)
         return make_paper_direct_target_stock_monokan_model_for_products(
+            config,
+            train_products,
+            feature_stats,
+            metadata=metadata,
+        )
+    if name in STRUCTURED_TARGET_STOCK_POLICY_NAMES:
+        metadata = dict(config.get("monokan", {}))
+        return make_paper_soft_quantile_target_stock_monokan_model_for_products(
             config,
             train_products,
             feature_stats,

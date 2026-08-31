@@ -14,6 +14,7 @@ from inventory_control.paper_lost_sales import historical_demand_base_stock_poli
 from inventory_control.policies.neural.fcnn import PaperFCNNFeatureStats, infer_model_device
 from inventory_control.products import PaperLostSalesProduct
 from inventory_control.training.direct_backprop import (
+    _paper_windowed_target_levels,
     paper_lost_sales_raw_order,
     paper_lost_sales_target_level,
     paper_rolling_target_levels,
@@ -108,7 +109,9 @@ def batched_torch_policy_metrics(
         roll_history = bool(getattr(model, "paper_roll_history", False))
         rollout_batch = dict(batch) if roll_history else batch
         uses_target_level = parameterization in {"order_up_to", "residual_order_up_to"}
-        rolling_target_levels = paper_rolling_target_levels(model, batch, demand_paths) if uses_target_level and roll_history else None
+        rolling_target_levels = (
+            _paper_windowed_target_levels(model, batch, demand_paths) if uses_target_level and roll_history else None
+        )
         target_level = paper_lost_sales_target_level(model, rollout_batch) if uses_target_level and not roll_history else None
         for t in range(horizon):
             if uses_target_level:

@@ -412,7 +412,81 @@ def paper_rolling_target_levels(
         )
         chunk_batch = {name: value[start:end] for name, value in flat_batch.items()}
         target_chunks.append(_paper_target_level_from_output(model, chunk_batch, model_output))
-    return torch.cat(target_chunks).reshape(batch_size, horizon)
+    targets = torch.cat(target_chunks).reshape(batch_size, horizon)
+    return _paper_smooth_rolling_targets(model, targets)
+
+
+def paper_expanding_target_levels(
+    model: nn.Module,
+    batch: dict[str, torch.Tensor],
+    demand_paths: torch.Tensor,
+) -> torch.Tensor:
+    """Predict targets from every observation available so far, not a fixed window.
+
+    The sliding window throws away data: by period 200 the policy still reads only
+    the last 32 demands, while a classical estimator that keeps everything has a
+    far tighter quantile estimate. Widening the window costs nothing structurally,
+    because the decoder's weights are non-negative for any window length, so the
+    target stays nondecreasing in every observation it has seen.
+    """
+    scale = torch.clamp(batch["feature_demand_scale"], min=1.0).unsqueeze(1)
+    history = batch["history"]
+    observed = torch.cat([history, demand_paths / scale], dim=1)
+    history_length = history.shape[1]
+    horizon = demand_paths.shape[1]
+    price_scale = torch.clamp(batch["feature_price_scale"], min=1.0)
+    economics = torch.stack(
+        [
+            batch["price"] / price_scale,
+            batch["purchase_cost"] / price_scale,
+            batch["holding_cost"] / price_scale,
+            batch["lost_sale_penalty"] / price_scale,
+        ],
+        dim=1,
+    )
+    targets = [
+        model.soft_quantile_target(observed[:, : history_length + step], economics)
+        for step in range(horizon)
+    ]
+    return torch.stack(targets, dim=1)
+
+
+def _paper_windowed_target_levels(
+    model: nn.Module,
+    batch: dict[str, torch.Tensor],
+    demand_paths: torch.Tensor,
+    checkpoint_model: bool = False,
+) -> torch.Tensor:
+    """Dispatch to the sliding or expanding observation window."""
+    if str(getattr(model, "paper_window_mode", "sliding")) == "expanding":
+        return _paper_smooth_rolling_targets(
+            model, paper_expanding_target_levels(model, batch, demand_paths)
+        )
+    return paper_rolling_target_levels(model, batch, demand_paths, checkpoint_model=checkpoint_model)
+
+
+def _paper_smooth_rolling_targets(model: nn.Module, targets: torch.Tensor) -> torch.Tensor:
+    """Optionally average a rolling target over the periods observed so far.
+
+    A target recomputed from a sliding window jitters, and with
+    ``q_t = max(S_t - I_t, 0)`` that jitter is asymmetric: an upward move buys
+    stock, a downward move cannot sell it back, so a jittering target overstocks
+    relative to a stable one with the same mean. Averaging the target over
+    elapsed periods both removes the jitter and widens the effective estimation
+    sample beyond the fixed window.
+
+    The running mean is a convex combination of per-period targets, each of
+    which is nondecreasing in the demands inside its own window, so every
+    certified direction is preserved.
+    """
+    smoothing = str(getattr(model, "paper_target_smoothing", "none"))
+    if smoothing == "none":
+        return targets
+    if smoothing != "running_mean":
+        raise ValueError(f"unsupported target smoothing: {smoothing!r}")
+    horizon = targets.shape[1]
+    elapsed = torch.arange(1, horizon + 1, device=targets.device, dtype=targets.dtype)
+    return torch.cumsum(targets, dim=1) / elapsed
 
 
 def paper_inventory_monotonicity_penalty(
@@ -567,17 +641,40 @@ def paper_named_parameter_l2_penalty(model: nn.Module, name_fragments: tuple[str
     return torch.stack(penalties).mean()
 
 
+def paper_product_reward_scales(
+    batch: dict[str, torch.Tensor],
+    horizon: int,
+) -> torch.Tensor:
+    """Return one detached positive reward scale per product."""
+    return torch.clamp(
+        torch.clamp(batch["price"], min=1.0)
+        * torch.clamp(batch["historical_mean_demand"], min=1.0)
+        * max(int(horizon), 1),
+        min=1.0,
+    ).detach()
+
+
 def paper_reward_normalization_scale(
     batch: dict[str, torch.Tensor],
     horizon: int,
 ) -> torch.Tensor:
     """Return a detached positive scale for comparable reward gradients."""
-    per_product_scale = (
-        torch.clamp(batch["price"], min=1.0)
-        * torch.clamp(batch["historical_mean_demand"], min=1.0)
-        * max(int(horizon), 1)
-    )
-    return torch.clamp(per_product_scale.mean(), min=1.0).detach()
+    return torch.clamp(paper_product_reward_scales(batch, horizon).mean(), min=1.0).detach()
+
+
+def paper_scaled_mean_reward(
+    rollout_rewards: torch.Tensor,
+    batch: dict[str, torch.Tensor],
+    horizon: int,
+) -> torch.Tensor:
+    """Return the mean of per-product rewards expressed in their own scale.
+
+    Product economics are drawn from heavy-tailed distributions, so a plain mean
+    of total rewards is dominated by a handful of high price-times-demand
+    products and carries almost no gradient for the rest of the catalogue.
+    Dividing each product by its own scale first weights every product equally.
+    """
+    return (rollout_rewards / paper_product_reward_scales(batch, horizon)).mean()
 
 
 def paper_lost_sales_fcnn_rollout(
@@ -600,7 +697,7 @@ def paper_lost_sales_fcnn_rollout(
     rollout_batch = dict(batch) if roll_history else batch
     uses_target_level = parameterization in {"order_up_to", "residual_order_up_to"}
     rolling_target_levels = (
-        paper_rolling_target_levels(
+        _paper_windowed_target_levels(
             model,
             batch,
             demand_paths,
@@ -789,6 +886,7 @@ def train_paper_lost_sales_fcnn(
     max_order_factor: float = PAPER_FCNN_MAX_ORDER_FACTOR,
     scale_action_by_history_mean: bool = False,
     normalize_reward_loss: bool = False,
+    per_product_reward_weighting: bool = False,
     monotonicity_penalty_weight: float = 0.0,
     monotonicity_samples_per_product: int = 1,
     cap_excess_penalty_weight: float = 0.0,
@@ -891,7 +989,7 @@ def train_paper_lost_sales_fcnn(
                 clip_predictions=clip_imitation_predictions,
             )
         else:
-            mean_total_reward = paper_lost_sales_fcnn_rollout(
+            rollout_rewards = paper_lost_sales_fcnn_rollout(
                 model,
                 batch,
                 max_order_factor=max_order_factor,
@@ -900,10 +998,14 @@ def train_paper_lost_sales_fcnn(
                 enforce_action_cap=effective_enforce_action_cap,
                 checkpoint_rolling_target=checkpoint_rolling_target,
                 checkpoint_raw_action=checkpoint_raw_action,
-            ).mean()
-            primary_loss = -mean_total_reward
-            if normalize_reward_loss:
-                primary_loss = primary_loss / paper_reward_normalization_scale(batch, horizon)
+            )
+            mean_total_reward = rollout_rewards.mean()
+            if per_product_reward_weighting:
+                primary_loss = -paper_scaled_mean_reward(rollout_rewards, batch, horizon)
+            else:
+                primary_loss = -mean_total_reward
+                if normalize_reward_loss:
+                    primary_loss = primary_loss / paper_reward_normalization_scale(batch, horizon)
         if monotonicity_penalty_weight > 0:
             monotonicity_penalty = paper_inventory_monotonicity_penalty(
                 model,
@@ -1030,14 +1132,22 @@ def train_paper_lost_sales_fcnn(
                 )
                 validation_batch = move_batch_to_device(validation_batch, infer_model_device(model))
                 with torch.no_grad():
-                    validation_reward_tensor = paper_lost_sales_fcnn_rollout(
+                    validation_rollout = paper_lost_sales_fcnn_rollout(
                         model,
                         validation_batch,
                         max_order_factor=max_order_factor,
                         scale_action_by_history_mean=scale_action_by_history_mean,
                         include_terminal_salvage=include_terminal_salvage,
                         enforce_action_cap=effective_enforce_action_cap,
-                    ).mean()
+                    )
+                    # Checkpoint selection must rank models the same way the
+                    # objective does, otherwise the selected epoch optimizes a
+                    # different criterion than the one being trained.
+                    validation_reward_tensor = (
+                        paper_scaled_mean_reward(validation_rollout, validation_batch, horizon)
+                        if per_product_reward_weighting
+                        else validation_rollout.mean()
+                    )
                 validation_reward = float(validation_reward_tensor.item())
             validation_rewards.append(float(validation_reward))
             validation_epochs.append(epoch + 1)

@@ -4,6 +4,7 @@ torch = pytest.importorskip("torch")
 
 from inventory_control.policies.neural.fcnn import compute_paper_fcnn_feature_stats
 from inventory_control.policies.neural.monokan import (
+    _project_edge_coefficients,
     MonoKANPolicy,
     _evaluate_hermite_curves,
     monokan_inventory_violation_rate,
@@ -431,3 +432,256 @@ def test_arithmetic_hermite_interval_lookup_matches_mask_at_knots_and_boundaries
     actual = _evaluate_hermite_curves(probes, grid, coef)
 
     assert torch.allclose(expected, actual, atol=1e-6, rtol=1e-6)
+
+
+def _monotone_context_model(**kwargs) -> MonoKANPolicy:
+    directions = {index: 1 for index in range(8)}
+    directions.update({8: 1, 9: -1, 10: -1, 11: 1})
+    return MonoKANPolicy(input_dim=12, hidden_layers=2, hidden_units=6, grid=7, monotonic_vars=directions, **kwargs)
+
+
+def _skewed_contexts(rows: int = 512) -> torch.Tensor:
+    generator = torch.Generator().manual_seed(11)
+    lags = torch.distributions.Exponential(1.0).sample((rows, 8))
+    economics = torch.rand((rows, 4), generator=generator) * torch.tensor([1.0, 0.5, 0.05, 0.02])
+    return torch.cat([lags, economics], dim=1)
+
+
+def test_nonuniform_hermite_lookup_matches_uniform_evaluation_on_a_uniform_grid() -> None:
+    generator = torch.Generator().manual_seed(3)
+    grid = torch.linspace(-2.0, 4.0, steps=6).repeat(4, 1)
+    coef = torch.randn(4, 6, 2, generator=generator)
+    x_eval = torch.randn(4, 64, generator=generator) * 3.0
+
+    uniform = _evaluate_hermite_curves(x_eval, grid, coef, uniform_grid=True)
+    searched = _evaluate_hermite_curves(x_eval, grid, coef, uniform_grid=False)
+
+    assert torch.allclose(uniform, searched, atol=1e-6)
+
+
+def test_adapted_grid_covers_observed_features_and_is_strictly_increasing() -> None:
+    model = _monotone_context_model()
+    contexts = _skewed_contexts()
+
+    model.adapt_grids_to_contexts(contexts, grid_eps=0.1)
+
+    first = model.layers[0]
+    knots = first.grid.view(first.out_dim, first.in_dim, -1)[0]
+    assert model.adaptive_grid is True
+    assert not first.uniform_grid
+    assert bool((knots[:, 1:] > knots[:, :-1]).all())
+    # The default [-2, 4] grid leaves the small-magnitude economics features
+    # inside a single interval; adapted knots must track their real support.
+    for index in (10, 11):
+        column = contexts[:, index]
+        assert knots[index, 0] <= column.min() + 1e-6
+        assert knots[index, -1] >= column.max() - 1e-6
+
+
+def test_adapted_grid_preserves_certified_monotone_directions() -> None:
+    model = _monotone_context_model()
+    contexts = _skewed_contexts()
+    model.adapt_grids_to_contexts(contexts, grid_eps=0.1)
+    model.apply_monotonic_constraints()
+    directions = dict(model.monotonic_vars)
+
+    model.eval()
+    with torch.no_grad():
+        base = model(contexts)
+        for index, direction in directions.items():
+            for bump in (0.01, 0.5, 5.0):
+                bumped = contexts.clone()
+                bumped[:, index] += bump
+                change = (model(bumped) - base) * direction
+                assert bool((change >= -1e-5).all()), f"feature {index} violated direction {direction}"
+
+
+def test_uniform_grid_flag_is_restored_when_loading_an_adapted_checkpoint() -> None:
+    source = _monotone_context_model()
+    source.adapt_grids_to_contexts(_skewed_contexts(), grid_eps=0.1)
+    target = _monotone_context_model()
+
+    target.load_state_dict(source.state_dict())
+
+    assert [layer.uniform_grid for layer in target.layers] == [False, False, False]
+    with torch.no_grad():
+        contexts = _skewed_contexts(32)
+        assert torch.allclose(source(contexts), target(contexts), atol=1e-6)
+
+
+def test_sorted_history_block_keeps_raw_lag_monotonicity_and_gradients() -> None:
+    model = _monotone_context_model()
+    model.sorted_history_length = 8
+    contexts = _skewed_contexts(128)
+
+    model.eval()
+    with torch.no_grad():
+        base = model(contexts)
+        for index in range(8):
+            bumped = contexts.clone()
+            bumped[:, index] += 0.75
+            assert bool(((model(bumped) - base) >= -1e-5).all())
+
+    differentiable = contexts.clone().requires_grad_(True)
+    model(differentiable).sum().backward()
+    assert differentiable.grad is not None
+    assert bool(torch.isfinite(differentiable.grad).all())
+    assert int((differentiable.grad[:, :8].abs() > 0).sum()) > 0
+
+
+def test_sorted_history_block_is_permutation_invariant_over_lags() -> None:
+    model = _monotone_context_model()
+    model.sorted_history_length = 8
+    contexts = _skewed_contexts(64)
+    shuffled = contexts.clone()
+    shuffled[:, :8] = contexts[:, torch.randperm(8)]
+
+    model.eval()
+    with torch.no_grad():
+        assert torch.allclose(model(contexts), model(shuffled), atol=1e-6)
+
+
+@pytest.mark.parametrize("direction", [1, -1])
+def test_projection_is_monotone_on_uneven_knots(direction: int) -> None:
+    """Interior knot derivatives are shared, so both intervals must constrain them.
+
+    Writing the per-interval conditions as separate ``[:, :-1]`` and ``[:, 1:]``
+    assignments lets the second assignment restore a derivative the first had
+    corrected, which leaves a visibly non-monotone segment on uneven grids.
+    """
+    torch.manual_seed(0)
+    worst = 0.0
+    for _ in range(150):
+        edges, intervals = 16, 7
+        raw = torch.rand(edges, intervals + 1).cumsum(1)
+        grid = raw / raw[:, -1:] * (0.02 + 3.0 * torch.rand(edges, 1))
+        coef = torch.randn(edges, intervals + 1, 2) * 3.0
+
+        _project_edge_coefficients(coef, grid, direction)
+
+        points = torch.stack(
+            [torch.linspace(float(grid[e, 0]), float(grid[e, -1]), 1500) for e in range(edges)]
+        )
+        values = _evaluate_hermite_curves(points, grid, coef, uniform_grid=False)
+        worst = max(worst, torch.clamp(-direction * torch.diff(values, dim=1), min=0.0).max().item())
+    assert worst < 1e-5, f"projected spline is not monotone: worst wrong increment {worst:.3e}"
+
+
+def _soft_quantile_policy(history_length: int = 12) -> "MonoKANSoftQuantileTargetPolicy":
+    from inventory_control.policies.neural.monokan import MonoKANSoftQuantileTargetPolicy
+
+    return MonoKANSoftQuantileTargetPolicy(
+        history_length=history_length,
+        economics_dim=4,
+        demand_scale=50.0,
+        hidden_layers=1,
+        hidden_units=6,
+        grid=5,
+        monotonic_vars={0: 1, 1: -1, 2: -1, 3: 1},
+    )
+
+
+def _soft_quantile_contexts(rows: int = 96, history_length: int = 12) -> torch.Tensor:
+    generator = torch.Generator().manual_seed(23)
+    lags = torch.distributions.Exponential(1.0).sample((rows, history_length))
+    economics = torch.rand((rows, 4), generator=generator) * torch.tensor([1.0, 0.5, 0.05, 0.02])
+    return torch.cat([lags, economics], dim=1).double()
+
+
+def test_soft_quantile_target_is_exactly_monotone_in_every_certified_direction() -> None:
+    model = _soft_quantile_policy().double().eval()
+    contexts = _soft_quantile_contexts()
+    directions = {**{index: 1 for index in range(12)}, 12: 1, 13: -1, 14: -1, 15: 1}
+
+    with torch.no_grad():
+        base = model(contexts)
+        for index, direction in directions.items():
+            for bump in (1e-3, 1e-2, 0.5, 5.0):
+                bumped = contexts.clone()
+                bumped[:, index] += bump
+                change = (model(bumped) - base) * direction
+                assert bool((change >= -1e-9).all()), f"feature {index} violated direction {direction}"
+
+
+def test_soft_quantile_target_is_scale_equivariant_in_observed_demand() -> None:
+    model = _soft_quantile_policy().double().eval()
+    contexts = _soft_quantile_contexts()
+
+    with torch.no_grad():
+        base = model(contexts)
+        scaled = model(torch.cat([contexts[:, :12] * 3.0, contexts[:, 12:]], dim=1))
+
+    live = base > 1e-9
+    assert bool(live.any())
+    assert torch.allclose(scaled[live] / base[live], torch.full_like(base[live], 3.0), atol=1e-9)
+
+
+def test_soft_quantile_weights_form_a_convex_combination_of_order_statistics() -> None:
+    model = _soft_quantile_policy().double().eval()
+    contexts = _soft_quantile_contexts(rows=32)
+
+    with torch.no_grad():
+        target = model(contexts) / model.demand_scale
+        order_statistics = torch.sort(contexts[:, :12], dim=1).values
+
+    # A convex combination of order statistics can never leave their range.
+    assert bool((target >= order_statistics[:, 0] - 1e-9).all())
+    assert bool((target <= order_statistics[:, -1] + 1e-9).all())
+
+
+def test_soft_quantile_target_increases_with_the_learned_level() -> None:
+    model = _soft_quantile_policy().double().eval()
+    contexts = _soft_quantile_contexts(rows=48)
+    order_statistics = torch.sort(contexts[:, :12], dim=1).values
+
+    previous = None
+    with torch.no_grad():
+        for level in torch.linspace(0.05, 0.95, 12, dtype=torch.float64):
+            model.calibrate_level(float(level), reference_economics=contexts[:, 12:])
+            current = model(contexts) / model.demand_scale
+            if previous is not None:
+                assert bool((current >= previous - 1e-9).all())
+            previous = current
+    assert bool((previous >= order_statistics[:, 0] - 1e-9).all())
+
+
+def test_running_mean_target_smoothing_averages_elapsed_periods() -> None:
+    from inventory_control.training.direct_backprop import _paper_smooth_rolling_targets
+
+    class _Model:
+        paper_target_smoothing = "running_mean"
+
+    targets = torch.tensor([[2.0, 4.0, 6.0, 8.0], [1.0, 1.0, 4.0, 10.0]])
+
+    smoothed = _paper_smooth_rolling_targets(_Model(), targets)
+
+    expected = torch.tensor([[2.0, 3.0, 4.0, 5.0], [1.0, 1.0, 2.0, 4.0]])
+    assert torch.allclose(smoothed, expected)
+
+
+def test_running_mean_target_smoothing_preserves_monotone_directions() -> None:
+    from inventory_control.training.direct_backprop import _paper_smooth_rolling_targets
+
+    class _Model:
+        paper_target_smoothing = "running_mean"
+
+    # Any per-period target that is nondecreasing in an input keeps that
+    # direction under a running mean, because the mean has non-negative weights.
+    generator = torch.Generator().manual_seed(5)
+    base = torch.rand((64, 40), generator=generator) * 10.0
+    increase = torch.rand((64, 40), generator=generator) * 3.0
+
+    smoothed_base = _paper_smooth_rolling_targets(_Model(), base)
+    smoothed_up = _paper_smooth_rolling_targets(_Model(), base + increase)
+
+    assert bool((smoothed_up - smoothed_base >= -1e-6).all())
+
+
+def test_unsupported_target_smoothing_is_rejected() -> None:
+    from inventory_control.training.direct_backprop import _paper_smooth_rolling_targets
+
+    class _Model:
+        paper_target_smoothing = "exponential"
+
+    with pytest.raises(ValueError, match="unsupported target smoothing"):
+        _paper_smooth_rolling_targets(_Model(), torch.ones(2, 3))

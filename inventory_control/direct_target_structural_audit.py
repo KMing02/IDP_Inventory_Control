@@ -231,7 +231,7 @@ def _spline_rows(model: MonoKANPolicy, model_name: str, seed: int) -> pd.DataFra
         left = torch.linspace(domain_min - 1.0, domain_min, 50).repeat(layer.out_dim, 1)
         right = torch.linspace(domain_max, domain_max + 1.0, 50).repeat(layer.out_dim, 1)
         for domain, points in (("spline_grid", inside), ("left_extrapolation", left), ("right_extrapolation", right)):
-            values = _evaluate_hermite_curves(points, grid, layer.coef[edges])
+            values = _evaluate_hermite_curves(points, grid, layer.coef[edges], uniform_grid=layer.uniform_grid)
             wrong = torch.clamp(-float(direction) * torch.diff(values, dim=1), min=0.0)
             rows.append(
                 {

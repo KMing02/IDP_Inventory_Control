@@ -16,6 +16,7 @@ from inventory_control.policies.neural.monokan import (
     make_paper_direct_target_stock_monokan_model,
     make_paper_deep_grid7_direct_target_stock_kan_model,
     make_paper_deep_grid7_direct_target_stock_monokan_model,
+    make_paper_soft_quantile_target_stock_monokan_model_for_products,
 )
 
 
@@ -76,6 +77,14 @@ NEURAL_POLICY_SPECS: tuple[NeuralPolicySpec, ...] = (
         5,
         402,
     ),
+    NeuralPolicySpec(
+        "MonoKANSoftQuantileTargetStock",
+        make_paper_soft_quantile_target_stock_monokan_model_for_products,
+        "monokan_soft_quantile_target_stock.pt",
+        "monokan",
+        6,
+        402,
+    ),
 )
 
 POLICY_SPECS_BY_NAME = {spec.name: spec for spec in NEURAL_POLICY_SPECS}
@@ -89,6 +98,7 @@ CAPACITY_DIRECT_TARGET_STOCK_POLICY_NAMES = (
     "KANDirectTargetStockDeepGrid7",
     "MonoKANDirectTargetStockDeepGrid7",
 )
+STRUCTURED_TARGET_STOCK_POLICY_NAMES = ("MonoKANSoftQuantileTargetStock",)
 
 
 def checkpoint_filenames() -> dict[str, str]:
