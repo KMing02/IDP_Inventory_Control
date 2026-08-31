@@ -1,0 +1,123 @@
+# Final soft-quantile MonoKAN target-stock policy.
+#
+# The target stock is a certified monotone smoothed empirical quantile of the
+# demand observed so far, at a level produced by a monotone KAN over product
+# economics only:
+#
+#   S_t = z_(1) + sum_k sigmoid((u - t_k) / tau) * (z_(k) - z_(k-1)),  u = sigmoid(MonoKAN(economics))
+#   q_t = max(S_t - I_t, 0)
+#
+# `z` are the ascending order statistics of the observed window and `t_k` are
+# fixed positions in [0, 1]. The weights are non-negative and sum to one, so the
+# target is nondecreasing in every raw demand observation; the order statistics
+# are sorted, so it increases with `u`; and the monotone level network gives the
+# certified economics directions.
+#
+# See docs/EXPERIMENTS.md for the evidence behind each setting.
+
+history_length_H: 32
+paper_history_feature_mode: raw_lags
+paper_include_newsvendor_feature: false
+training_horizon_T: 100
+evaluation_horizon: 520
+burn_in: 20
+training_products: 5000
+test_products: 300
+batch_size: 512
+epochs: 2400
+optimizer: Adam
+learning_rate: 0.001
+include_terminal_salvage: true
+
+fcnn:
+  history_encoder: causal_cnn
+  hidden_layers: 2
+  hidden_units: 32
+  cnn_channels: 8
+  cnn_dilations: [1, 2, 4, 8, 16]
+  activation: ELU
+  roll_history: true
+  scale_action_by_history_mean: true
+  max_order_factor: 4.0
+
+monokan:
+  # Level network: monotone KAN over the four economics features.
+  # 2x8 is deliberate. Larger KANs fit the critical fractile *worse* -- the
+  # supervised fit degrades from RMSE 0.026 (2x8) to 0.033 (3x16, grid 12).
+  level_network: monokan
+  level_hidden_layers: 2
+  level_hidden_units: 8
+  grid: 7
+  grid_range: [-2.0, 4.0]
+  noise_scale: 0.01
+  # Fit spline knots to observed feature quantiles. With the fixed [-2, 4] grid,
+  # normalized holding cost and lost-sales penalty span a fraction of one
+  # interval and their splines cannot bend at all.
+  adaptive_grid: true
+  adaptive_grid_eps: 0.1
+  # Use every observation seen so far rather than the last 32.
+  window_mode: expanding
+  # Smoothing width in order statistics, not window fraction, so it transfers
+  # from the 100-period training rollout to the 520-period evaluation.
+  temperature_mode: count
+  initial_temperature: 2.0
+  initial_quantile_level: 0.85
+  # A convex combination cannot exceed the largest observation, yet the optimal
+  # target sits above all of them for roughly a fifth of products.
+  gain_mode: level
+  roll_history: true
+  scale_action_by_history_mean: true
+  max_order_factor: 4.0
+
+idp_benchmark:
+  # 5,000 training products. Reward is flat from 1,000 (4285.30 vs 4285.53) but
+  # regret improves 1.04% -> 0.80%; an earlier negative result at this size was
+  # an artefact of a 600-epoch budget. Imitation warm-start is deliberately
+  # absent: it is severely harmful here (regret 8.6% at 200 epochs, 21.6% at 50).
+  seed: 2025
+  max_order_factor: 4.0
+  normalize_observations: true
+  normalize_reward_loss: false
+  # Equalise each product's contribution to the gradient. The level network is a
+  # single shared function of four economics features, so an unweighted reward
+  # sum fits it only where the large price-times-demand products live.
+  # This is the single largest regret improvement: 1.77% -> 1.04%.
+  per_product_reward_weighting: true
+  include_terminal_salvage: true
+  training_demand_mode: fixed_future
+  initial_inventory_mode: last_historical_demand
+  enforce_action_cap: false
+  compact:
+    training_products: 5000
+    validation_products: 300
+    batch_size: 512
+    training_horizon: 100
+    imitation_epochs: 0
+    reward_epochs: 2400
+    validation_interval: 150
+    evaluation_horizon: 520
+    burn_in: 20
+
+demand_distribution: Gamma
+
+product_features:
+  - price
+  - purchase_cost
+  - holding_cost
+  - lost_sale_penalty
+  - mean_demand
+  - coefficient_of_variation
+
+product_generation:
+  seed: 2025
+  mode: paper_table_1
+  price_mean: 100.0
+  holding_cost_mean: 5.0
+  mean_demand_mean: 100.0
+  lost_sale_penalty_max: 10.0
+  coefficient_of_variation_range: [0.0, 1.0]
+
+tuning:
+  min_stock_level: 0
+  max_stock_level: 120
+  oracle_mc_samples: 200000
