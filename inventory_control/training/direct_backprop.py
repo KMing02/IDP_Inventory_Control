@@ -476,6 +476,7 @@ def train_paper_lost_sales_fcnn(
     track_imitation_validation: bool = False,
     reset_optimizer_after_imitation: bool = False,
     adam_kwargs: dict[str, Any] | None = None,
+    reward_checkpoint_callback: Callable[[int, nn.Module], None] | None = None,
     device: torch.device | str | None = None,
 ) -> DirectBackpropResult:
     """Train a neural policy with imitation followed by DirectBackprop.
@@ -484,7 +485,10 @@ def train_paper_lost_sales_fcnn(
     enabled, ``imitation_max_epochs`` is the upper bound and a deterministic
     validation-grid RMSE controls patience. The validation-best imitation
     checkpoint is restored before reward training. Adam can optionally be
-    recreated at that boundary without resetting model weights.
+    recreated at that boundary without resetting model weights. The optional
+    reward checkpoint callback is observational: update zero is emitted after
+    imitation restoration and before the first reward update, followed by one
+    callback after each completed reward optimizer update.
     """
     if imitation_epochs < 0 or epochs < 0:
         raise ValueError("imitation_epochs and epochs must be nonnegative")
@@ -776,10 +780,15 @@ def train_paper_lost_sales_fcnn(
         optimizer = make_optimizer()
         optimizer_reset_performed = True
 
+    if reward_checkpoint_callback is not None:
+        reward_checkpoint_callback(0, model)
+
     for reward_index in range(int(epochs)):
         global_epoch += 1
         log_row, _ = train_epoch(global_epoch, imitation_phase=False)
         log_row["optimizer_reset_after_imitation"] = int(optimizer_reset_performed)
+        if reward_checkpoint_callback is not None:
+            reward_checkpoint_callback(reward_index + 1, model)
         validate_reward(global_epoch, log_row, is_final=reward_index + 1 == int(epochs))
         training_log.append(log_row)
 

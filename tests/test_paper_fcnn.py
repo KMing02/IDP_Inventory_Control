@@ -288,6 +288,44 @@ def test_training_always_validates_final_epoch() -> None:
     assert result.best_validation_reward == 5.0
 
 
+def test_reward_checkpoint_callback_observes_restored_imitation_state_and_updates() -> None:
+    products = PaperLostSalesProductGenerator(_paper_config()).generate(4, "train")
+    validation_products = PaperLostSalesProductGenerator(_paper_config()).generate(2, "validation")
+    model = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
+    observed: list[tuple[int, dict[str, torch.Tensor]]] = []
+
+    result = train_paper_lost_sales_fcnn(
+        products,
+        model,
+        horizon=3,
+        batch_size=2,
+        epochs=2,
+        learning_rate=1e-3,
+        seed=0,
+        imitation_epochs=1,
+        validation_products=validation_products,
+        imitation_early_stopping=True,
+        imitation_max_epochs=3,
+        imitation_patience=2,
+        imitation_min_delta=0.0,
+        reward_checkpoint_callback=lambda update, current_model: observed.append(
+            (
+                update,
+                {
+                    key: value.detach().clone()
+                    for key, value in current_model.state_dict().items()
+                },
+            )
+        ),
+    )
+
+    assert [update for update, _ in observed] == [0, 1, 2]
+    assert result.best_imitation_state_dict is not None
+    for key, value in result.best_imitation_state_dict.items():
+        assert torch.equal(observed[0][1][key], value)
+    assert result.best_state_dict is None
+
+
 def test_training_tracks_best_imitation_checkpoint() -> None:
     products = PaperLostSalesProductGenerator(_paper_config()).generate(4, "train")
     model = FCNNPolicy(input_dim=37, hidden_layers=1, hidden_units=8, activation="ELU")
