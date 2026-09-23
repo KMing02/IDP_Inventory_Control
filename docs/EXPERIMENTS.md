@@ -25,11 +25,49 @@ The original headline metric hid a 21% typical-product failure behind a 3.6% mea
 | Soft-quantile MonoKAN, weighted objective, 5k products | Recommended final policy. | `4285.53 +/- 0.19` | `0.80%` | `configs/paper_lost_sales_soft_quantile_monokan.yaml` | FINAL MAIN |
 | Soft-quantile MonoKAN, weighted objective, 1k products | Same policy at the smaller training set. | `4285.30 +/- 0.54` | `1.04%` | same, `training_products: 1000` | FINAL ABLATION |
 | Soft-quantile MonoKAN, profit objective | Same policy maximising total profit. | `4286.46 +/- 0.23` | `1.77%` | `configs/paper_lost_sales_soft_quantile_monokan_profit.yaml` | FINAL MAIN |
-| Soft-quantile MLP level network | Cost of the monotonicity certificate, decoder and parameters held fixed. | `4286.29 +/- 0.80` | `2.23%` | profit config, `level_network: mlp`, `level_hidden_units: 40` | FINAL CONTROL |
-| Soft-quantile unconstrained KAN level network | Separates the constraint from the KAN representation. | `4274.10 +/- 2.31` | `2.41%` | profit config, `level_network: kan` | FINAL CONTROL |
+| Soft-quantile MonoKAN, expanding decoder | Matched partner for the MLP control. | `4286.21 +/- 0.43` | `1.62%` | profit config, 2400 epochs | FINAL CONTROL |
+| Soft-quantile MLP level network | Cost of the monotonicity certificate, decoder and parameters held fixed. | `4286.29 +/- 0.80` | `2.23%` | profit config, 2400 epochs, `level_network: mlp`, `level_hidden_units: 40` | FINAL CONTROL |
+| Soft-quantile MonoKAN, sliding decoder | Matched partner for the KAN control. | `4280.83` | `1.71%` | profit config, 2400 epochs, sliding window + running-mean decoder | FINAL CONTROL |
+| Soft-quantile MLP level network, sliding decoder | Third arm of the sliding-decoder control. | `4278.75` | `2.12%` | same, `level_network: mlp` | FINAL CONTROL |
+| Soft-quantile unconstrained KAN level network | Separates the constraint from the KAN representation. | `4274.10 +/- 2.31` | `2.41%` | same, `level_network: kan` | FINAL CONTROL |
 | Unconstrained FCNN direct target stock | Shipped neural anchor. | `4174.41 +/- 4.36` | `9.98%` | `configs/paper_lost_sales_rolling_direct_target_dev_1k_normalized.yaml` | FINAL MAIN |
 | DeepGrid7 MonoKAN direct target stock | Shipped monotone policy; the starting point. | `4111.59 +/- 3.31` | `21.40%` | same | FINAL MAIN |
 | Unconstrained DeepGrid7 KAN direct target stock | Shows the shipped gap was representation, not monotonicity. | `4130.54 +/- 3.95` | `20.68%` | same, `KANDirectTargetStockDeepGrid7` | FINAL CONTROL |
+
+Each control is only readable against the arm it was matched to, not against the
+profit row above it. The MLP control shares the expanding decoder and a 2400-epoch
+budget with its MonoKAN partner: the paired difference is `-0.08` per period,
+95% CI `[-2.09, +1.93]`, `p = 0.94`, so the certificate costs no measurable profit.
+The KAN control shares the sliding-window and running-mean decoder with its own
+partner, where MonoKAN leads the unconstrained KAN by `+6.73` per period
+(`p = 0.0001`). Comparing an arm across those two blocks confounds the decoder
+with the level network.
+
+## Direct-Quantity Evidence
+
+Under the order-up-to decoder, `q = max(S - I, 0)` supplies monotonicity in
+inventory for every model, so the certificate only binds on the four economic
+inputs. The direct-quantity formulation removes the subtraction: the network emits
+the order with inventory as input 0, and the property has to be certified. Three
+seeds, 400 epochs, `configs/paper_lost_sales_rolling_direct_target_dev_1k_normalized.yaml`,
+300 validation products, reproduced by `scripts/run_direct_quantity_comparison.py`.
+
+| Policy | Reward | Products violating | Order drop per unit of stock | Params | Status |
+|---|---:|---:|---:|---:|---|
+| Raw-action MonoKAN | `4094.87` | `0.0%` | `-0.151` | 4,265 | FINAL MAIN |
+| Raw-action KAN, constraint removed | `4160.95` | `48.1%` | `-0.242` | 4,265 | FINAL CONTROL |
+| Raw-action paper FCNN | `3824.74` | `0.0%` | `-0.246` | 2,105 | FINAL CONTROL |
+
+The violation rate is architecture dependent. The unconstrained KAN violates on
+44-52% of products in every seed, which is the failure mode the proposal predicted;
+the feed-forward network does not violate at all. Violations are widespread but
+mild: 3.4-4.3% of swept steps, worst rise `0.015` mean-demand units.
+
+Unlike the target-stock controls, the certificate is not free here: the
+unconstrained KAN earns `+66` per period over the certified model. No direct-quantity
+policy approaches the ideal slope of `-1.00`, and all lose to the target-stock
+policy's `4285.53`, so the decoder supplies ordering strength while the certificate
+supplies direction. The FCNN arm is unstable across seeds (`3140.9` to `4182.2`).
 
 ## Superseded Evidence
 

@@ -35,13 +35,15 @@ Three seeds, identical products and demand paths. Regret is the mean per-product
 | Policy | Reward / period | Regret | Params |
 |---|---:|---:|---:|
 | Omniscient base stock (uses hidden Gamma parameters) | 4297.45 | 0.00% | — |
-| **Soft-quantile MonoKAN, weighted objective** | 4285.30 +/- 0.54 | **1.04%** | 1,892 |
+| **Soft-quantile MonoKAN, weighted objective** | 4285.53 +/- 0.19 | **0.80%** | 1,892 |
 | **Soft-quantile MonoKAN, profit objective** | **4286.46 +/- 0.23** | 1.77% | 1,892 |
 | Soft-quantile MLP control (unconstrained, matched) | 4286.29 +/- 0.80 | 2.23% | 1,884 |
 | Classical Gamma-fit base stock (32 lags) | 4274.91 | 1.35% | — |
 | Classical empirical-quantile base stock (32 lags) | 4264.52 | 1.76% | — |
 | Unconstrained FCNN direct target stock | 4174.41 +/- 4.36 | 9.98% | 2,073 |
 | DeepGrid7 MonoKAN direct target stock | 4111.59 +/- 3.31 | 21.40% | 15,297 |
+
+The weighted row is the shipped 5,000-product setting; the same policy trained on 1,000 products reaches `4285.30 +/- 0.54` and `1.04%` regret.
 
 The two soft-quantile rows are the same policy under different objectives and are Pareto-optimal against each other: the weighted objective wins on 60% of products (Wilcoxon `p = 0.0006`) while total profit is a statistical tie (`p = 0.33`).
 
