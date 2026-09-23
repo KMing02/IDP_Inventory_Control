@@ -278,6 +278,7 @@ class MonoKANPolicy(nn.Module):
         self.adaptive_grid = False
         self.adaptive_grid_eps = 0.0
         self.sorted_history_length = 0
+        self.sorted_history_offset = 0
         self.output_upper_bound = float(output_upper_bound) if output_upper_bound is not None else None
         self.output_logit_anchor = float(output_logit_anchor) if output_logit_anchor is not None else None
         self.output_logit_anchor_feature_index = (
@@ -321,7 +322,8 @@ class MonoKANPolicy(nn.Module):
     def _prepare_inputs(self, features: torch.Tensor) -> torch.Tensor:
         """Apply the input reparameterization the network is trained on.
 
-        Sorting the demand-lag block replaces exchangeable raw lags with their
+        Sorting the demand-lag block (which starts at ``sorted_history_offset``,
+        non-zero when inventory precedes the lags) replaces exchangeable raw lags with their
         order statistics, so each first-layer spline sees one quantile of the
         observed demand distribution instead of an arbitrary chronological
         position. Every order statistic is nondecreasing in every raw lag, so
@@ -330,8 +332,10 @@ class MonoKANPolicy(nn.Module):
         length = int(self.sorted_history_length)
         if length <= 0:
             return features
-        sorted_history = torch.sort(features[..., :length], dim=-1).values
-        return torch.cat([sorted_history, features[..., length:]], dim=-1)
+        start = int(self.sorted_history_offset)
+        stop = start + length
+        sorted_history = torch.sort(features[..., start:stop], dim=-1).values
+        return torch.cat([features[..., :start], sorted_history, features[..., stop:]], dim=-1)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """Return non-negative normalized order quantity."""
@@ -1087,3 +1091,111 @@ def make_paper_soft_quantile_target_stock_monokan_model_for_products(
 def _paper_economics_monotonic_vars() -> dict[int, int]:
     """Return certified directions for price, purchase cost, holding cost, penalty."""
     return {0: 1, 1: -1, 2: -1, 3: 1}
+
+
+def _history_mean(historical_demand: Sequence[float]) -> float:
+    """Return the mean observed demand used to scale inventory onto demand units."""
+    values = list(historical_demand)
+    return float(sum(values) / max(len(values), 1))
+
+
+def _paper_raw_action_monotonic_vars(history_length: int) -> dict[int, int]:
+    """Return structural directions for a direct-quantity ordering policy.
+
+    Raw-action features are on-hand inventory, then the demand lags, then price,
+    purchase cost, holding cost, and lost-sale penalty. Unlike the target-stock
+    decoder, nothing here subtracts inventory from a target, so the direction
+    that matters most - never order more because stock went up - has to be
+    certified by the network itself.
+    """
+    directions = {0: -1}
+    directions.update({1 + index: 1 for index in range(int(history_length))})
+    directions.update(
+        {
+            int(history_length) + 1: 1,
+            int(history_length) + 2: -1,
+            int(history_length) + 3: -1,
+            int(history_length) + 4: 1,
+        }
+    )
+    return directions
+
+
+def make_paper_raw_action_monokan_model_for_products(
+    config: dict,
+    products: Sequence[PaperLostSalesProduct],
+    feature_stats: PaperFCNNFeatureStats,
+    metadata: dict | None = None,
+) -> MonoKANPolicy:
+    """Build a direct-quantity MonoKAN that emits the order itself.
+
+    The target-stock decoder obtains ``q = max(S - I, 0)`` monotonicity in
+    inventory from the subtraction, so every variant satisfies it and the
+    certified constraint only binds on the economics. Taking inventory as an
+    input and emitting the order directly is the setting where the constraint
+    actually does work, so this factory is what the monotone comparison needs.
+    """
+    source = dict(metadata or config.get("monokan", {}))
+    history_length = int(source.get("history_length_H", config["history_length_H"]))
+    history_feature_mode = str(config.get("paper_history_feature_mode", "raw_lags"))
+    if history_feature_mode != "raw_lags":
+        raise ValueError("the raw-action policy requires the raw_lags history feature mode")
+    initial_order = empirical_newsvendor_target_ratio(products, feature_stats=feature_stats)
+    # Dropping the constraints leaves an identical KAN, which isolates the cost
+    # of monotonicity from the cost of the architecture.
+    monotone = bool(source.get("monotone", True))
+    model = MonoKANPolicy(
+        input_dim=1 + history_length + 4,
+        hidden_layers=int(source.get("hidden_layers", 1)),
+        hidden_units=int(source.get("hidden_units", 16)),
+        grid=int(source.get("grid", 5)),
+        grid_range=tuple(source.get("grid_range", [-2.0, 4.0])),
+        noise_scale=float(source.get("noise_scale", 0.01)),
+        monotonic_vars=_paper_raw_action_monotonic_vars(history_length) if monotone else {},
+        initial_normalized_order=initial_order,
+        output_upper_bound=None,
+    )
+    # Grids must span the inventory the policy will actually meet, so the
+    # calibration contexts sweep stock levels instead of evaluating at zero.
+    inventory_levels = torch.linspace(0.0, 2.0, 5).tolist()
+    contexts = torch.tensor(
+        [
+            build_paper_lost_sales_features(
+                inventory=float(inventory) * _history_mean(product.historical_demand),
+                historical_demand=product.historical_demand,
+                price=product.price,
+                purchase_cost=product.purchase_cost,
+                holding_cost=product.holding_cost,
+                lost_sale_penalty=product.lost_sale_penalty,
+                feature_stats=feature_stats,
+                history_feature_mode=history_feature_mode,
+                include_newsvendor_feature=False,
+            )
+            for product in products
+            for inventory in inventory_levels
+        ],
+        dtype=torch.float32,
+    )
+    if bool(source.get("sort_history_lags", config.get("monokan", {}).get("sort_history_lags", False))):
+        model.sorted_history_length = history_length
+        model.sorted_history_offset = 1
+    if bool(source.get("adaptive_grid", config.get("monokan", {}).get("adaptive_grid", False))):
+        model.adapt_grids_to_contexts(
+            contexts,
+            grid_eps=float(source.get("adaptive_grid_eps", config.get("monokan", {}).get("adaptive_grid_eps", 0.1))),
+        )
+    model.apply_monotonic_constraints()
+    if monotone:
+        model.initialize_open_output(initial_order, reference_contexts=contexts)
+    else:
+        model.initialize_constant_output(initial_order)
+    model.paper_action_parameterization = "raw"
+    model.paper_history_feature_mode = history_feature_mode
+    model.paper_include_newsvendor_feature = False
+    model.paper_include_demand_level_feature = False
+    model.paper_enforce_action_cap = False
+    model.paper_initialization_mode = (
+        "empirical_newsvendor_open_readout" if monotone else "global_empirical_newsvendor_median"
+    )
+    model.paper_roll_history = bool(source.get("roll_history", True))
+    return model

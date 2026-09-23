@@ -4,7 +4,9 @@ torch = pytest.importorskip("torch")
 
 from inventory_control.policies.neural.fcnn import compute_paper_fcnn_feature_stats
 from inventory_control.policies.neural.monokan import (
+    _paper_raw_action_monotonic_vars,
     _project_edge_coefficients,
+    make_paper_raw_action_monokan_model_for_products,
     MonoKANPolicy,
     _evaluate_hermite_curves,
     monokan_inventory_violation_rate,
@@ -286,6 +288,47 @@ def test_monokan_training_reapplies_monotonic_projection() -> None:
     fixed_features = [0.0] + [0.5] * 36
     inventory_grid = [index / 10 for index in range(40)]
     assert monokan_inventory_violation_rate(model, fixed_features, inventory_grid) == 0.0
+
+
+def test_raw_action_monokan_certifies_every_observable_direction() -> None:
+    directions = _paper_raw_action_monotonic_vars(32)
+
+    assert len(directions) == 37
+    assert directions[0] == -1
+    assert all(directions[1 + lag] == 1 for lag in range(32))
+    assert [directions[33], directions[34], directions[35], directions[36]] == [1, -1, -1, 1]
+
+
+def test_raw_action_monokan_orders_less_as_inventory_grows_after_training() -> None:
+    """The direct-quantity policy has no subtraction to lean on, so the network itself must decrease."""
+    config = _paper_config()
+    products = PaperLostSalesProductGenerator(config).generate(4, "train")
+    feature_stats = compute_paper_fcnn_feature_stats(products)
+    model = make_paper_raw_action_monokan_model_for_products(
+        config,
+        products,
+        feature_stats,
+        metadata={"hidden_layers": 1, "hidden_units": 4, "grid": 3, "sort_history_lags": True},
+    )
+    assert model.paper_action_parameterization == "raw"
+    assert model.sorted_history_offset == 1
+
+    train_paper_lost_sales_fcnn(products, model, horizon=3, batch_size=2, epochs=1, learning_rate=1e-3, seed=0)
+
+    fixed_features = [0.0] + [0.5] * 36
+    inventory_grid = [index / 10 for index in range(40)]
+    assert monokan_inventory_violation_rate(model, fixed_features, inventory_grid) == 0.0
+
+
+def test_sorted_history_offset_leaves_leading_inventory_feature_in_place() -> None:
+    model = MonoKANPolicy(input_dim=5, hidden_layers=1, hidden_units=2, grid=3, monotonic_vars={0: -1})
+    model.sorted_history_length = 3
+    model.sorted_history_offset = 1
+    features = torch.tensor([[9.0, 3.0, 1.0, 2.0, 7.0]])
+
+    prepared = model._prepare_inputs(features)
+
+    assert prepared.tolist() == [[9.0, 1.0, 2.0, 3.0, 7.0]]
 
 
 def test_monokan_raw_imitation_improves_calibration_and_logs_diagnostics() -> None:
