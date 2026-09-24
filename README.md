@@ -36,8 +36,10 @@ The analytical references are:
 
 - **Historical Gamma** (`NonOmniscientOptimal` internally), fitted from each
   product's historical demand;
-- **Omniscient Gamma** (`OmniscientOptimal` internally), fitted with access to
-  the corresponding future-demand distribution for benchmark evaluation.
+- **Omniscient Gamma** (`OmniscientOptimal` internally), which uses the
+  true product-specific Gamma distribution parameters used to generate
+  demand. It serves as an oracle benchmark and does not use realized
+  future demand observations.
 
 The central distinction is that hard monotonicity guarantees only that desired
 order quantity is non-increasing in inventory. An exact order-up-to decoder
@@ -160,8 +162,9 @@ manifest without training.
 | `scripts/run_primary_imitation_convergence_audit.py` | Fixed-checkpoint validation trajectory at reward updates 0, 15, 30, 60, 120, and 240 |
 
 The provenance audit requires the frozen checkpoint manifest, matched-run
-records, and archived checkpoints. These binary/result artifacts are not stored
-in Git and must be supplied through the accompanying reproducibility archive.
+records, and archived checkpoints. These binary/result artifacts are not included in this code submission.
+They are required for exact reproduction of the archived checkpoint
+provenance results.
 The convergence audit uses the provenance outputs to verify update-0 and
 update-15 states before extending the validation-only trajectories.
 
