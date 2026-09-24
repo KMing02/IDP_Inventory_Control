@@ -634,7 +634,17 @@ def plot_representative_product(
             lower, median, upper = _curve_quantiles(curves)
             color = COLORS[policy]
             ax.fill_between(factors, lower, upper, color=color, alpha=0.10, linewidth=0)
-            ax.plot(factors, median, color=color, linewidth=1.8, label=policy)
+            linestyle = "--" if policy == "PenaltyMLP" else "-"
+            zorder = 7 if policy == "PenaltyMLP" else (6 if policy == "PaperFCNN" else 4)
+            ax.plot(
+                factors,
+                median,
+                color=color,
+                linewidth=1.8,
+                linestyle=linestyle,
+                zorder=zorder,
+                label=policy,
+            )
             if policy == "PaperFCNN" and highlight_fcnn_seed is not None:
                 ax.plot(
                     factors,

@@ -1,541 +1,244 @@
-# Structure-Informed Neural Inventory Control Benchmark
+# Inductive Biases for Neural Inventory Control
 
-This repository is a research codebase for structure-informed neural inventory control. The goal is to compare neural policy architectures, including unconstrained FCNNs, MonoKAN, and optionally MLPs with monotonicity penalties.
+This repository contains the code developed for the individual TUM IDP report
+**From Monotonicity to Order-Up-To Structure: Inductive Biases for Neural Inventory Control**.
+It studies neural policies for stationary, no-lead-time, single-item lost-sales
+inventory systems across a heterogeneous population of products.
 
-This is not a generic reinforcement learning benchmark. The intended training direction is DirectBackprop-style differentiable policy optimization through inventory simulators, where domain structure is injected through inventory balance equations, lead-time pipeline states, monotonicity of order quantities with respect to inventory position, and classical heuristic baselines.
+The final report is submitted separately. Its LaTeX source, bibliography,
+compiled PDF, and report figure PDFs are intentionally not part of this code
+repository.
 
-The current priority is replicating the lost-sales setting from Maggiar et al. (2025), "Structure-Informed Deep Reinforcement Learning for Inventory Management". Generic benchmark scenarios remain in the repository, but they are secondary until the lost-sales replication is stable.
+The submitted scope is the FCNN/CMNN line of work. The obsolete MonoKAN
+implementation that remains in the repository is not part of this report and is
+maintained separately by the MonoKAN team. It is intentionally left untouched
+until the repository owner approves its removal.
 
-The current implementation includes clean true simulators, demand processes, heuristic baselines, evaluation, plotting, tests, a paper-style lost-sales replication layer, an unconstrained FCNN training path, and an initial adapted MonoKAN policy module.
+## Scientific scope
 
-## Project Status
+The final report compares increasingly specific inductive biases:
 
-Current status:
+1. **PaperFCNN** -- an unconstrained direct-order policy. The repository name
+   `PaperFCNN` denotes the FCNN derived from the paper-style benchmark.
+2. **PenaltyMLP** -- the same direct-order FCNN trained with a sampled soft
+   monotonicity penalty.
+3. **PositiveWeightMLP** -- a simple hard-monotone direct-order baseline.
+4. **ConstrainedMonoMLP (CMNN)** -- a direct-order constrained monotonic neural
+   network with convex, concave, and bounded activation groups.
+5. **TargetStockFCNN** -- a context network that predicts a positive,
+   dimensionless target-stock multiple and uses the exact decoder
+   `q = relu(S - inventory)`.
+6. **Residual order-up-to policies** -- FCNN and CMNN-backbone context models
+   that learn a bounded residual correction around a Historical Gamma
+   target-stock anchor and use the same exact order-up-to decoder.
 
-- Core single-item lost-sales simulators are implemented and tested.
-- Paper-style no-lead-time lost-sales product generation, reward evaluation, base-stock baselines, and FCNN training are implemented.
-- FCNN evaluation is comparable against baselines using the same test products, seeds, horizon, and burn-in.
-- Failure-analysis CSV generation is available for policy comparison and bottom-product inspection.
+The analytical references are:
 
-Current limitations:
+- **Historical Gamma** (`NonOmniscientOptimal` internally), fitted from each
+  product's historical demand;
+- **Omniscient Gamma** (`OmniscientOptimal` internally), fitted with access to
+  the corresponding future-demand distribution for benchmark evaluation.
 
-- Paper lost-sales product generation follows Table 1 of Maggiar et al. for the synthetic LS setting, and the FCNN path uses the current paper-style observable feature pipeline.
-- `OmniscientOptimal` is the exact Gamma critical-quantile base-stock benchmark and uses hidden true demand parameters.
-- Differentiable training is validated for the FCNN path; the adapted MonoKAN module is implemented and unit-tested but has not yet been fully benchmarked.
-- Multi-echelon, perishability, and procurement-removal settings are not implemented yet.
-- Generated outputs and model checkpoints are intentionally ignored by Git and are not required for tests.
+The central distinction is that hard monotonicity guarantees only that desired
+order quantity is non-increasing in inventory. An exact order-up-to decoder
+additionally enforces active-region slope `-1` and zero order above the target
+stock. The report evaluates structural behavior separately from operational
+reward.
 
-## Setup
-
-Use Python 3.10 or newer.
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-```
-
-For runtime-only use without test/neural dependencies:
-
-```bash
-python -m pip install -e .
-```
-
-For neural-only dependencies when not using `.[dev]`:
-
-```bash
-python -m pip install -e ".[neural]"
-```
-
-## Environments
-
-`LostSalesZeroLeadTimeEnv`
-
-- State: on-hand inventory.
-- Action: scalar order quantity.
-- Orders arrive immediately.
-- Demand not satisfied from available inventory is lost.
-
-`LostSalesLeadTimeEnv`
-
-- State: `[on_hand_inventory, pipeline_order_1, ..., pipeline_order_L]`.
-- `pipeline_order_1` arrives next period.
-- Action: scalar order quantity.
-- New orders enter the last pipeline position.
-
-`DualSourcingEnv`
-
-- State: `[on_hand_inventory, regular_pipeline..., expedited_pipeline...]`.
-- Action: `[regular_order_quantity, expedited_order_quantity]`.
-- Regular supply is cheaper and slower.
-- Expedited supply is faster and more expensive.
-
-All environments use lost-sales dynamics:
+## Repository layout
 
 ```text
-available = on_hand + arrivals
-sales = min(available, demand)
-lost_sales = max(demand - available, 0)
-ending_inventory = max(available - demand, 0)
+configs/                    Frozen benchmark and experiment configurations
+inventory_control/          Environments, products, policies, evaluation, training
+scripts/                    Experiment, audit, and plotting entry points
+tests/                      Unit and workflow tests
+reports/
+  data/                     Compact validation-only plotting inputs
+  plot_target_stock_reward_dynamics.py  Plotting utility retained as code
+outputs/                    Generated artifacts; intentionally ignored by Git
 ```
 
-Costs include holding cost, lost-sales cost, order costs, and optional fixed order costs.
+Key model implementations are in:
 
-## Demand Processes
+- `inventory_control/policies/neural/fcnn.py`
+- `inventory_control/policies/neural/constrained_mlp.py`
+- `inventory_control/training/direct_backprop.py`
+- `inventory_control/paper_lost_sales.py`
+- `inventory_control/idp_benchmark.py`
 
-Implemented demand models:
+## Environment
 
-- `PoissonDemand`
-- `NormalDemand`, rounded and clipped at zero
-- `NegativeBinomialDemand`
-- `SeasonalPoissonDemand`
-- `RegimeSwitchingPoissonDemand`
-- `DeterministicDemand` for tests
+Python 3.10 or newer is required. Install the project and test dependencies with:
 
-## Baseline Policies
+```bash
+python -m pip install -e ".[dev,neural]"
+```
 
-Implemented heuristic baselines:
+The final experiments were run locally on CPU in two recorded environments:
 
-- `BaseStockPolicy`: zero-lead-time order-up-to policy.
-- `InventoryPositionBaseStockPolicy`: lead-time base-stock policy using on-hand plus pipeline inventory.
-- `DualSourcingHeuristicPolicy`: configurable regular and expedited order-up-to heuristic.
-- `ConstantOrderPolicy`
-- `RandomPolicy`
+| Experiment family | Python | PyTorch | NumPy | pandas |
+|---|---:|---:|---:|---:|
+| Primary tuning, matched comparison, residual and convergence audits | 3.10.20 | 2.12.1+cpu | 2.2.6 | 2.3.3 |
+| Target-stock and direct-q 120-update diagnostics | 3.12.7 | 2.12.1+cpu | 1.26.4 | 2.2.2 |
 
-The dual-sourcing heuristic is a baseline, not an optimality claim.
+The dependency declarations are in `pyproject.toml`, `requirements.txt`,
+`requirements-neural.txt`, and `requirements-dev.txt`. Per-run
+`environment.json` files record the exact environment used for each completed
+experiment.
 
-## Run Tests
+## Frozen data and evaluation design
+
+The main configuration is:
+
+```text
+configs/paper_lost_sales_medium_seed0_converged.yaml
+```
+
+The experiment runners separate training randomness from product generation,
+validation-grid generation, and operational evaluation scenarios. The main
+validation workflows use 128 training products, 32 validation products, the
+fixed validation-grid seed `2000003`, operational seeds `40000--40031`, and the
+shared deployment cap `F=4`.
+
+Generated products and demand paths are deterministic from the configuration;
+they are not committed as private input data. Each completed workflow records
+data/configuration fingerprints so that compatible runs can be checked before
+reuse.
+
+## Main workflows
+
+All commands below are intended for the **training and validation splits only**.
+Generated artifacts are written under `outputs/` and are ignored by Git.
+
+### Two-stage primary tuning
+
+```bash
+python scripts/tune_primary_neural_policies.py \
+  --stage screening \
+  --config configs/paper_lost_sales_medium_seed0_converged.yaml \
+  --profile full --split validation --seeds 0 \
+  --output-dir outputs/idp_tuning/primary_neural_balanced8_validation \
+  --resume
+
+python scripts/tune_primary_neural_policies.py \
+  --stage confirmation \
+  --config configs/paper_lost_sales_medium_seed0_converged.yaml \
+  --profile full --split validation --seeds 1 2 \
+  --output-dir outputs/idp_tuning/primary_neural_balanced8_validation \
+  --resume
+```
+
+Use `--dry-run` (also accepted as `--manifest-only`) to inspect the tuning
+manifest without training.
+
+### Primary and structural validation analyses
+
+| Script | Purpose |
+|---|---|
+| `scripts/run_primary_validation_followups.py` | Equal-capacity and sample-efficiency validation analyses |
+| `scripts/run_primary_structural_ood_diagnostic.py` | Inventory-range structural diagnostics without operational evaluation |
+| `scripts/run_policy_behavior_extrapolation_analysis.py` | Reconstructed training-state support, inventory-state extrapolation, and policy-behavior figures |
+| `scripts/run_no_imitation_ablation.py` | Reward-only direct-policy diagnostic without imitation |
+| `scripts/run_penalty_gradient_audit.py` | Controlled PenaltyMLP gradient audit |
+| `scripts/run_cmnn_initialization_ablation.py` | Direct-q CMNN initialization diagnostic |
+
+### Residual and target-stock analyses
+
+| Script | Purpose |
+|---|---|
+| `scripts/run_residual_order_up_to_validation.py` | Historical-Gamma-anchored residual order-up-to comparison |
+| `scripts/run_target_stock_validation.py` | Ten-seed reward-only TargetStockFCNN validation analysis |
+| `scripts/run_target_stock_training_dynamics.py` | Standard/informed target-stock dynamics through 120 reward updates |
+| `scripts/run_direct_q_120_update_diagnostic.py` | Matched direct-q FCNN 120-update diagnostic |
+| `reports/plot_target_stock_reward_dynamics.py` | Rebuild the target-stock dynamics visualization from bundled validation CSVs only |
+
+### Checkpoint provenance and convergence
+
+| Script | Purpose |
+|---|---|
+| `scripts/run_primary_checkpoint_provenance_audit.py` | Reconstruct and verify the 20 archived primary FCNN/CMNN checkpoints |
+| `scripts/run_primary_imitation_convergence_audit.py` | Fixed-checkpoint validation trajectory at reward updates 0, 15, 30, 60, 120, and 240 |
+
+The provenance audit requires the frozen checkpoint manifest, matched-run
+records, and archived checkpoints. These binary/result artifacts are not stored
+in Git and must be supplied through the accompanying reproducibility archive.
+The convergence audit uses the provenance outputs to verify update-0 and
+update-15 states before extending the validation-only trajectories.
+
+## Protected-test safety
+
+The protected test was consumed exactly once under the frozen final protocol.
+Its raw products, demand traces, predictions, per-product outputs, and generated
+evaluation directory are deliberately excluded from this Git submission.
+
+`scripts/run_final_protected_test_evaluation.py` is retained only to document
+the frozen evaluation implementation and for unit testing of its safety guards.
+Do not run it as part of ordinary setup, testing, or validation reproduction.
+
+The separately submitted report contains the already-recorded aggregate
+protected-test results. No other workflow documented here requires
+protected-test access.
+
+## Reproducibility artifacts
+
+The Git repository contains source code, configurations, tests, and two compact
+validation-only CSVs needed by the included target-stock plotting utility. It
+does not contain the final report materials or the complete historical
+experiment outputs.
+
+A clean clone is sufficient to inspect the implementations, run unit tests, and
+start new validation experiments from the frozen configurations. It is not, by
+itself, sufficient to reproduce every historical table, checkpoint-provenance
+decision, or figure. Exact reproduction of those completed results additionally
+requires an external artifact archive containing the relevant outputs,
+especially:
+
+- `outputs/idp_tuning/primary_neural_balanced8_validation/`
+- `outputs/idp_followup/matched_width_depth_10seed_validation/`
+- `outputs/idp_followup/equal_capacity_validation/`
+- `outputs/idp_followup/data_efficiency_validation/`
+- `outputs/idp_followup/no_imitation_matched_width_validation/`
+- `outputs/idp_followup/residual_order_up_to_validation/`
+- `outputs/idp_followup/target_stock_reward_only_validation/`
+- `outputs/idp_followup/target_stock_training_dynamics/`
+- `outputs/idp_followup/direct_q_120_update_diagnostic/`
+- `outputs/idp_followup/primary_checkpoint_provenance_audit/`
+- `outputs/idp_followup/primary_imitation_assisted_convergence_validation/`
+- `outputs/idp_followup/policy_behavior_extrapolation_validation/`
+
+At minimum, preserve resolved configurations, aggregate/seed-level CSVs,
+fingerprints, completion metadata, checkpoint hashes, and the checkpoints needed
+by the provenance analysis. Large artifacts should be distributed separately
+rather than committed to Git. The protected-test output directory must not be
+included in that archive unless access is explicitly authorized by the project
+supervisor.
+
+## Tests and source checks
+
+The normal test suite does not require running training experiments or accessing
+the protected test:
 
 ```bash
 python -m pytest
+git diff --check
 ```
 
-## Quick Smoke Test
-
-Run a tiny end-to-end check using `configs/paper_lost_sales_debug.yaml`:
+Individual workflow tests can be run with, for example:
 
 ```bash
-python scripts/run_quick_smoke_test.py
+python -m pytest tests/test_primary_neural_tuning.py
+python -m pytest tests/test_primary_validation_followups.py
+python -m pytest tests/test_policy_behavior_extrapolation_analysis.py
+python -m pytest tests/test_residual_order_up_to.py
+python -m pytest tests/test_target_stock_fcnn.py
+python -m pytest tests/test_target_stock_validation.py
+python -m pytest tests/test_target_stock_training_dynamics.py
+python -m pytest tests/test_final_protected_test_runner.py
 ```
 
-This command generates a tiny paper-style product set, evaluates historical/oracle base-stock baselines, trains a miniature FCNN for a few epochs, and evaluates it. It does not require any pre-existing files in `outputs/`.
+These are unit/workflow checks; they do not authorize rerunning the protected
+evaluation.
 
-## Reproducible Commands
+## License and attribution
 
-From a clean checkout:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-python -m pytest
-python scripts/run_quick_smoke_test.py
-python scripts/run_paper_lost_sales_baselines.py
-python scripts/train_paper_lost_sales_fcnn.py
-python scripts/evaluate_paper_lost_sales_fcnn.py
-python scripts/train_paper_lost_sales_monokan.py
-python scripts/evaluate_paper_lost_sales_monokan.py
-python scripts/analyze_paper_lost_sales_fcnn_failures.py
-```
-
-The evaluation scripts default to the validation split. The held-out test split should be used only for the final report:
-
-```bash
-python scripts/run_paper_lost_sales_baselines.py --split test --final-test
-python scripts/evaluate_paper_lost_sales_fcnn.py --split test --final-test
-python scripts/evaluate_paper_lost_sales_monokan.py --split test --final-test
-```
-
-## Reward And Cost Naming
-
-The repository uses two separate conventions:
-
-- Generic inventory simulators use cost minimization:
-  - `total_cost`
-  - `mean_total_cost`
-  - `mean_cost_per_period`
-  - lower is better
-
-- Maggiar-style paper replication uses reward/profit maximization:
-  - `total_reward`
-  - `mean_total_reward`
-  - `mean_reward_per_period`
-  - higher is better
-
-For paper-style neural training, the optimizer minimizes:
-
-```text
-training_loss = -mean_total_reward
-```
-
-so training loss going down corresponds to reward going up.
-
-## Primary Replication Target: Maggiar Et Al. Lost-Sales Setting
-
-The main replication config is:
-
-```text
-configs/paper_lost_sales.yaml
-```
-
-It defines the lost-sales history length, training/evaluation horizons, FCNN architecture, Gamma-demand product generation, and local runtime caps.
-
-The main paper config uses the synthetic product distribution from Table 1 of Maggiar et al.:
-
-```text
-price p                 ~ Exponential(mean=100)
-purchase cost c         = p * U, U ~ Uniform(0, 1)
-holding cost h          ~ Exponential(mean=5)
-lost-sale penalty k     = 10 * U, U ~ Uniform(0, 1)
-mean demand mu          ~ Exponential(mean=100)
-demand CV nu            ~ Uniform(0, 1)
-```
-
-The sampled `mu` and `nu` define hidden Gamma demand parameters. For each product, the generator samples one full demand trace. The first `H` values are stored as observable historical demand, and the future values are used by training/evaluation rollouts. Policies do not receive the hidden Gamma parameters or future demand trace.
-
-Run paper-style no-lead-time LS baselines:
-
-```bash
-python scripts/run_paper_lost_sales_baselines.py
-```
-
-This writes:
-
-```text
-outputs/results/paper_lost_sales_baselines_validation.csv
-```
-
-The two explicit baselines are:
-
-- `OmniscientOptimal`: uses hidden true Gamma parameters and is an oracle.
-- `NonOmniscientOptimal`: fits Gamma parameters from historical demand observations only.
-- `HistoricalDemandBaseStock`: empirical historical quantile diagnostic, not the primary paper baseline.
-
-Train the paper-style FCNN:
-
-```bash
-python scripts/train_paper_lost_sales_fcnn.py
-```
-
-Training uses observable product features only: full historical demand, current inventory, and product economics. Feature scaling is computed from training products only, the output is clipped by a configurable multiple of historical mean demand, and the saved checkpoint is selected by validation true reward. Training writes:
-
-```text
-outputs/results/paper_lost_sales_fcnn_training_log.csv
-outputs/plots/paper_lost_sales_fcnn_training_curve.png
-outputs/models/paper_lost_sales_fcnn.pt
-```
-
-Evaluate the saved FCNN:
-
-```bash
-python scripts/evaluate_paper_lost_sales_fcnn.py
-```
-
-This writes:
-
-```text
-outputs/results/paper_lost_sales_fcnn_eval_validation.csv
-```
-
-Train the adapted MonoKAN policy:
-
-```bash
-python scripts/train_paper_lost_sales_monokan.py
-```
-
-The current MonoKAN implementation adapts the MIT-licensed Hermite-spline monotonicity mechanism from the official MonoKAN repository. It constrains order quantity to be nonincreasing in current inventory before action scaling/clipping. This is implemented and unit-tested, but it should be treated as preliminary until benchmarked against FCNN and base-stock baselines.
-
-Training writes:
-
-```text
-outputs/results/paper_lost_sales_monokan_training_log.csv
-outputs/models/paper_lost_sales_monokan.pt
-```
-
-Evaluate the saved MonoKAN:
-
-```bash
-python scripts/evaluate_paper_lost_sales_monokan.py
-```
-
-This writes:
-
-```text
-outputs/results/paper_lost_sales_monokan_eval_validation.csv
-```
-
-Run a validation-only MonoKAN tuning sweep:
-
-```bash
-python scripts/sweep_paper_lost_sales_monokan.py
-```
-
-This writes:
-
-```text
-outputs/results/paper_lost_sales_monokan_sweep_validation.csv
-```
-
-## Colab Training
-
-The local config is intentionally capped. For a larger validation run on Google Colab, use:
-
-```bash
-python -m pip install -e ".[dev]"
-python scripts/run_colab_paper_lost_sales.py
-```
-
-This uses:
-
-```text
-configs/paper_lost_sales_colab.yaml
-```
-
-The Colab runner still evaluates validation only. It does not touch the held-out test split. Useful variants:
-
-```bash
-python scripts/run_colab_paper_lost_sales.py --models monokan --skip-baselines
-python scripts/run_colab_paper_lost_sales.py --models fcnn --skip-sweeps
-```
-
-You can also run individual scripts with the Colab config:
-
-```bash
-PAPER_LOST_SALES_CONFIG=configs/paper_lost_sales_colab.yaml python scripts/train_paper_lost_sales_monokan.py
-PAPER_LOST_SALES_CONFIG=configs/paper_lost_sales_colab.yaml python scripts/evaluate_paper_lost_sales_monokan.py
-```
-
-Only after model selection is frozen, run the final held-out test once:
-
-```bash
-PAPER_LOST_SALES_CONFIG=configs/paper_lost_sales_colab.yaml python scripts/run_paper_lost_sales_baselines.py --split test --final-test
-PAPER_LOST_SALES_CONFIG=configs/paper_lost_sales_colab.yaml python scripts/evaluate_paper_lost_sales_fcnn.py --split test --final-test
-PAPER_LOST_SALES_CONFIG=configs/paper_lost_sales_colab.yaml python scripts/evaluate_paper_lost_sales_monokan.py --split test --final-test
-```
-
-Sweep stronger FCNN sizes:
-
-```bash
-python scripts/sweep_paper_lost_sales_fcnn.py
-```
-
-This compares `2x32`, `3x64`, and `3x128` FCNNs and writes:
-
-```text
-outputs/results/paper_lost_sales_fcnn_sweep.csv
-```
-
-Plot policy structure and monotonicity diagnostics:
-
-```bash
-python scripts/plot_paper_lost_sales_policy_structure.py
-```
-
-This writes:
-
-```text
-outputs/plots/paper_lost_sales_policy_structure.png
-```
-
-The main evaluation focus is FCNN/MonoKAN performance, policy structure, and monotonicity diagnostics. Dual sourcing, perishability, and procurement-removal are later paper-setting extensions.
-
-Analyze FCNN vs base-stock baselines:
-
-```bash
-python scripts/analyze_paper_lost_sales_fcnn_failures.py
-```
-
-This writes:
-
-```text
-outputs/results/paper_lost_sales_policy_comparison_summary_validation.csv
-outputs/results/paper_lost_sales_fcnn_worst_cases_validation.csv
-```
-
-## IDP Monotonic Architecture Benchmark
-
-The IDP benchmark is LS-first and paper-aligned. It starts with the no-lead-time
-lost-sales setting from Maggiar et al. before considering any extensions.
-
-- `PaperFCNN`: the causal-CNN plus MLP architecture from the paper.
-- `MonoKAN`: a Hermite-spline architecture with nonincreasing inventory response enforced by construction.
-- `ConstrainedMonoMLP`: a faithful CMNN with allocated convex, concave, and bounded monotone activations.
-- `PositiveWeightMLP`: a simpler positive-weight monotone MLP used as an expressiveness control.
-- `PenaltyMLP`: an optional penalty-based reference, not the primary method.
-- `NonOmniscientOptimal`: Gamma method-of-moments base-stock benchmark using historical demand.
-- `OmniscientOptimal`: exact Gamma critical-quantile base-stock benchmark using hidden parameters.
-
-Run the deterministic compact benchmark:
-
-```bash
-python scripts/run_idp_benchmark.py --mode structure-ls --profile compact
-```
-
-Run the paper replication baseline:
-
-```bash
-python scripts/run_idp_benchmark.py --mode replicate-ls --profile paper_replication
-```
-
-The held-out test split remains protected:
-
-```bash
-python scripts/run_idp_benchmark.py --mode structure-ls --profile paper_replication --split test --final-test
-```
-
-Artifacts are written under `outputs/idp_benchmark/<mode>_<profile>_<split>/`:
-
-```text
-summary.csv
-paper_table3_replication.csv
-operational_metrics.csv
-predictions.csv
-training_log.csv
-monokan_splines.csv
-metadata.json
-models/
-plots/
-```
-
-The primary report is `paper_table3_replication.csv`, which gives average
-reward and gap to the omniscient optimal benchmark. Structural artifacts include
-policy curves, order-up-to scatter plots, violation rates, slope diagnostics,
-MonoKAN spline samples, and constrained-MLP architecture comparisons.
-The explicitly named `raw_zero_inventory_order_up_to_*` and
-`deployed_zero_inventory_order_up_to_*` metrics use only `state_index == 0`:
-there is one observation per product, comparing the policy-implied
-zero-inventory order-up-to level with the raw or deployed oracle level. They
-measure zero-inventory calibration, not full-grid policy shape. The legacy
-`raw_order_up_to_*`, `deployed_order_up_to_*`, and `order_up_to_*` fields are
-numerically identical aliases retained for compatibility. Median, P90,
-maximum, largest-product contribution, and top-3 contribution fields make
-outlier concentration visible; contribution fields are shares of total
-absolute error. Full-grid shape remains represented by
-`active_slope_deviation_from_minus_one` and
-`inactive_slope_deviation_from_zero`.
-Perishability, multi-echelon, and real-world data are intentionally out of scope
-until the LS replication is credible.
-
-Open `notebooks/idp_monotonic_inventory_control.ipynb` for the visual analysis.
-Its default `PROFILE="auto"` loads full validation artifacts when present and
-otherwise runs and caches the compact benchmark. Execute it non-interactively:
-
-```bash
-python -m jupyter nbconvert --to notebook --execute notebooks/idp_monotonic_inventory_control.ipynb --output idp_monotonic_inventory_control_executed.ipynb --output-dir outputs
-```
-
-## Run Original Baselines
-
-```bash
-python scripts/run_baselines.py
-```
-
-This uses `configs/lost_sales_default.yaml` and writes:
-
-```text
-outputs/results/baseline_results.csv
-```
-
-## Tune Single Base-Stock Benchmark
-
-```bash
-python scripts/tune_base_stock.py
-```
-
-This grid-searches `S` over the configured range and writes:
-
-```text
-outputs/results/base_stock_grid.csv
-```
-
-## Run Benchmark Scenarios
-
-```bash
-python scripts/run_benchmark_baselines.py
-```
-
-This loads `configs/benchmark_scenarios.yaml`, evaluates heuristic baselines across zero-lead-time, lead-time, high-variance, seasonal, cost-regime, and dual-sourcing scenarios, and writes:
-
-```text
-outputs/results/benchmark_baselines.csv
-```
-
-The benchmark scenarios include:
-
-- `lost_sales_zero_lead_time`
-- `lost_sales_lead_time_L2`
-- `lost_sales_lead_time_high_variance`
-- `lost_sales_lead_time_seasonal`
-- `lost_sales_high_stockout_cost`
-- `lost_sales_high_holding_cost`
-- `dual_sourcing_basic`
-- `dual_sourcing_high_variance`
-
-Fixed scenarios test robustness across hand-designed settings: different lead times, demand processes, and cost regimes are specified explicitly in the scenario YAML.
-
-## Run Product Generalization Benchmark
-
-```bash
-python scripts/run_product_benchmark_baselines.py
-```
-
-This loads `configs/product_benchmark.yaml`, generates heterogeneous train, validation, and test product sets, tunes heuristic base-stock baselines per product, and writes:
-
-```text
-outputs/results/product_benchmark_baselines.csv
-```
-
-The product benchmark tests generalization across unseen products rather than only robustness across fixed hand-designed scenarios. Each generated product has hidden true simulator parameters, historical demand observations, cost parameters, lead-time information, and an initial inventory level.
-
-Two base-stock benchmarks are reported:
-
-- `HistoricalBaseStockPolicy`: non-omniscient tuning using only historical demand observations and observable product features. This is the realistic benchmark.
-- `OracleBaseStockPolicy`: omniscient tuning using the product's hidden true simulator parameters and a larger Monte Carlo sample. This is an oracle reference, not a deployable policy.
-
-Policies should receive practical observable features such as current inventory, pipeline orders, recent demand history, costs, and lead time. They should not receive the true demand parameters used internally by the simulator.
-
-## Plot Benchmark Results
-
-```bash
-python scripts/plot_benchmark_baselines.py
-```
-
-Plots are saved to:
-
-```text
-outputs/plots/
-```
-
-## Train Minimal Neural Policy
-
-The first neural path is a minimal zero-lead-time PyTorch setup:
-
-```bash
-python scripts/train_zero_lead_time_mlp.py
-```
-
-It trains an unconstrained MLP through a differentiable zero-lead-time simulator, then evaluates the trained policy on the true discrete simulator. The paper-style IDP benchmark above contains the soft-penalty MLP and strict MonoKAN comparison.
-
-## Train Product-Level Lead-Time MLP
-
-```bash
-python scripts/train_product_lead_time_mlp.py
-```
-
-This trains one unconstrained MLP across generated lead-time products using only historical demand summaries, costs, lead time, on-hand inventory, and pipeline state as inputs. It evaluates the same trained policy on train, validation, and test products in the true discrete lead-time simulator and writes:
-
-```text
-outputs/results/product_lead_time_mlp.csv
-```
-
-This is the first product-level neural generalization path. It is intentionally unconstrained; monotonic architectures should be compared against it later.
-
-## Research Direction
-
-The benchmark supports differentiable policy optimization and a controlled comparison of unconstrained, soft-penalty, and architecturally monotone policies. Later extensions can apply the same comparison to lead-time, dual-sourcing, multi-echelon, and perishable settings.
-
-## License
-
-License is currently undecided. See `LICENSE` for the placeholder note. Choose a real license before public release or external collaboration.
+See `LICENSE` and `third_party_licenses/` for repository and third-party notices.

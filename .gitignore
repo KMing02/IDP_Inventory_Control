@@ -26,6 +26,20 @@ outputs/**/*.ckpt
 *.ckpt
 .ipynb_checkpoints/
 tmp/
+
+# The final report and presentation are submitted separately from the code.
+reports/*.tex
+reports/*.bib
+reports/*.pdf
+reports/figures/
+reports/slides/
+reports/*.aux
+reports/*.bbl
+reports/*.blg
+reports/*.log
+reports/*.out
+reports/*.toc
+
 .DS_Store
 IDP_Inventory_Control/
 third_party/
