@@ -1,0 +1,188 @@
+/* Final report: A4, printed to PDF by headless Chrome (see build_report.py). */
+
+@page {
+  size: A4;
+  margin: 24mm 22mm 22mm 22mm;
+  @bottom-center {
+    content: counter(page);
+    font-family: "Segoe UI", Arial, sans-serif;
+    font-size: 9pt;
+    color: #6a6a6a;
+  }
+  @top-right {
+    content: "End-to-End Inventory Control via Monotonic KANs";
+    font-family: "Segoe UI", Arial, sans-serif;
+    font-size: 8pt;
+    color: #8a8a8a;
+  }
+}
+
+@page :first {
+  @bottom-center { content: none; }
+  @top-right { content: none; }
+}
+
+:root {
+  --blue: #0065bd;
+  --dark: #003359;
+  --pale: #e5eff8;
+  --grey: #6a6a6a;
+  --rule: #b8b8b8;
+  --orange: #e37222;
+}
+
+html { font-size: 10.5pt; }
+
+body {
+  margin: 0;
+  font-family: Cambria, "Times New Roman", serif;
+  line-height: 1.42;
+  color: #1a1a1a;
+  text-align: justify;
+  hyphens: auto;
+  orphans: 3;
+  widows: 3;
+}
+
+h1, h2, h3, .caption-label, table, .title-page, .toc, .keyfacts, figcaption, .diagram {
+  font-family: "Segoe UI", Arial, sans-serif;
+}
+
+h1 {
+  font-size: 15.5pt;
+  color: var(--dark);
+  margin: 20pt 0 8pt 0;
+  padding-top: 2pt;
+  break-after: avoid;
+}
+
+/* New pages only where a reader expects them. */
+h1#introduction, h1#results-main, h1#appendix-a { break-before: page; margin-top: 0; }
+
+h2 {
+  font-size: 12pt;
+  color: var(--blue);
+  margin: 15pt 0 5pt 0;
+  break-after: avoid;
+}
+
+h3 {
+  font-size: 10.5pt;
+  color: var(--dark);
+  margin: 11pt 0 3pt 0;
+  break-after: avoid;
+}
+
+p { margin: 0 0 7pt 0; }
+
+a { color: var(--blue); text-decoration: none; }
+
+ul, ol { margin: 0 0 7pt 0; padding-left: 16pt; }
+li { margin-bottom: 3pt; }
+
+.math { font-family: Cambria, "Cambria Math", serif; font-style: italic; white-space: nowrap; }
+.math .up { font-style: normal; }
+
+.equation {
+  display: flex;
+  align-items: center;
+  margin: 6pt 0 8pt 0;
+  break-inside: avoid;
+}
+.equation .body {
+  flex: 1;
+  text-align: center;
+  font-family: Cambria, "Cambria Math", serif;
+  font-size: 11pt;
+}
+.equation .number { width: 30pt; text-align: right; color: var(--grey); font-family: "Segoe UI", Arial, sans-serif; font-size: 9pt; }
+.frac { display: inline-flex; flex-direction: column; vertical-align: middle; text-align: center; font-size: 10pt; margin: 0 2pt; }
+.frac > span:first-child { border-bottom: 0.7pt solid #1a1a1a; padding: 0 3pt 1pt 3pt; }
+.frac > span:last-child { padding: 1pt 3pt 0 3pt; }
+
+figure { margin: 10pt 0 12pt 0; break-inside: avoid; text-align: center; }
+figure img { max-width: 100%; }
+figure img.half { max-width: 49%; }
+figcaption { font-size: 8.8pt; color: #333; text-align: justify; margin-top: 4pt; line-height: 1.35; }
+.caption-label { font-weight: 700; color: var(--dark); }
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  text-align: left;
+  hyphens: manual;
+  font-size: 8.8pt;
+  margin: 4pt 0 4pt 0;
+  break-inside: avoid;
+}
+caption { caption-side: top; text-align: justify; font-size: 8.8pt; color: #333; margin-bottom: 4pt; line-height: 1.35; }
+thead th { border-top: 1.1pt solid #1a1a1a; border-bottom: 0.7pt solid #1a1a1a; font-weight: 600; padding: 3pt 5pt; }
+tbody td { padding: 2.6pt 5pt; border-bottom: 0.4pt solid #e2e2e2; vertical-align: top; }
+tbody tr:last-child td { border-bottom: 1.1pt solid #1a1a1a; }
+th.num, td.num { text-align: right; white-space: nowrap; }
+td.center, th.center { text-align: center; }
+tr.ours td { background: var(--pale); font-weight: 600; }
+tr.group td { font-weight: 700; color: var(--dark); border-bottom: 0.4pt solid var(--rule); padding-top: 5pt; }
+.table-wrap { margin: 10pt 0 12pt 0; break-inside: avoid; }
+.note { font-size: 8.2pt; color: var(--grey); margin-top: 2pt; }
+
+.verdict { display: inline-block; min-width: 38pt; text-align: center; border-radius: 7pt; padding: 0 5pt; font-weight: 600; }
+.yes { background: #dde6b5; }
+.partly { background: #f3e7c7; }
+.no { background: #f6d2b8; }
+.untested { border: 0.6pt solid var(--rule); color: var(--grey); }
+
+.keyfacts {
+  border-left: 3pt solid var(--blue);
+  background: #f4f8fc;
+  padding: 7pt 10pt;
+  margin: 8pt 0 10pt 0;
+  font-size: 9.3pt;
+  text-align: left;
+  break-inside: avoid;
+}
+.keyfacts p { margin: 0 0 3pt 0; }
+.keyfacts p:last-child { margin: 0; }
+
+/* Title page */
+.title-page { height: 245mm; display: flex; flex-direction: column; text-align: left; }
+.title-page .institution { font-size: 10pt; color: var(--dark); line-height: 1.45; }
+.title-page .institution strong { color: var(--blue); font-size: 13pt; }
+.title-page .kind { margin-top: 48mm; font-size: 11pt; letter-spacing: 0.5pt; color: var(--grey); text-transform: uppercase; }
+.title-page .title { margin-top: 6mm; font-size: 23pt; font-weight: 700; color: var(--dark); line-height: 1.2; }
+.title-page .subtitle { margin-top: 5mm; font-size: 12pt; color: var(--blue); }
+.title-page .rule { margin-top: 12mm; width: 40mm; border-top: 2.5pt solid var(--blue); }
+.title-page .people { margin-top: 10mm; font-size: 11pt; line-height: 1.6; }
+.title-page .people span { color: var(--grey); display: inline-block; width: 30mm; }
+.title-page .date { margin-top: auto; font-size: 10pt; color: var(--grey); }
+
+/* Abstract and contents */
+.abstract { margin-top: 0; }
+.abstract h2 { margin-top: 0; }
+.toc { break-before: page; font-size: 10pt; }
+.toc h2 { margin-bottom: 6pt; }
+.toc ol { list-style: none; padding-left: 0; margin: 0; }
+.toc li { display: flex; margin: 0 0 2.5pt 0; }
+.toc li.sub { padding-left: 16pt; font-size: 9pt; color: #333; }
+.toc li .label { white-space: nowrap; }
+.toc li .dots { flex: 1; border-bottom: 0.6pt dotted #9a9a9a; margin: 0 4pt 3pt 4pt; }
+.toc li .page { width: 14pt; text-align: right; }
+.toc li.top { font-weight: 600; margin-top: 4pt; }
+
+/* Design diagram */
+.diagram { font-size: 8.4pt; margin: 4pt 0 2pt 0; }
+.diagram .flow-label { text-align: left; font-weight: 700; color: var(--dark); font-size: 8.8pt; margin: 6pt 0 2pt 0; }
+.diagram .row { display: flex; align-items: center; justify-content: flex-start; margin: 0 0 6pt 0; }
+.diagram .box { white-space: nowrap; }
+.diagram .box.wrap { white-space: normal; max-width: 118pt; }
+.diagram .box { border: 0.8pt solid var(--blue); border-radius: 4pt; padding: 4pt 6pt; background: #fff; text-align: center; line-height: 1.25; }
+.diagram .box.net { background: var(--blue); color: #fff; border-color: var(--blue); font-weight: 600; }
+.diagram .box.fixed { background: #f2f2f2; border-color: #9a9a9a; }
+.diagram .box.out { background: var(--pale); font-weight: 600; }
+.diagram .inputs { display: flex; flex-direction: column; gap: 3pt; }
+.diagram .arrow { color: var(--grey); font-size: 13pt; margin: 0 5pt; }
+
+.refs p { padding-left: 16pt; text-indent: -16pt; text-align: left; font-size: 9.4pt; margin-bottom: 5pt; }
+code, .mono { font-family: Consolas, "Courier New", monospace; font-size: 8.3pt; }
+.cmd { font-family: Consolas, "Courier New", monospace; font-size: 7.6pt; text-align: left; overflow-wrap: anywhere; }
+.avoid-break { break-inside: avoid; }
