@@ -1,13 +1,13 @@
 # Final Experiment Index
 
-Evidence relevant to the final IDP report. All rows use three seeds (2025, 2026, 2027) on identical products and demand paths unless stated otherwise. Historical exploratory branches live in Git history, not in the current tree.
+Evidence relevant to the final IDP report. All rows use three seeds (2025, 2026, 2027) on identical products and demand paths unless stated otherwise. Historical exploratory branches live in Git history, not in the current tree; the configs and modules of the superseded experiments were removed after commit `226f001` and can be restored from it (`git show 226f001:<path>`). The commands that reproduce each table are collected under Reproduction at the end.
 
 ## Metrics
 
 Two metrics are reported throughout, because they disagree and the disagreement is informative.
 
 - **Reward per period**: the mean over validation products. Product economics are heavy tailed, so this is dominated by a handful of large price-times-demand products.
-- **Regret**: the mean per-product shortfall against the omniscient base-stock policy, in percent. Scale free, and therefore far more sensitive to typical-SKU behaviour.
+- **Regret**: the mean per-product shortfall against the omniscient base-stock policy, in percent. Scale free, and therefore far more sensitive to typical-SKU behaviour. Products on which the omniscient policy itself earns nothing or loses money (21 of the 300 validation products) have no meaningful relative shortfall and are excluded; this reproduces the classical baselines' `1.35%` and `1.76%` exactly.
 
 The original headline metric hid a 21% typical-product failure behind a 3.6% mean gap, which is why both are now reported.
 
@@ -18,7 +18,52 @@ The original headline metric hid a 21% typical-product failure behind a 3.6% mea
 - **FINAL ABLATION**: supports interpretation of the main result.
 - **SUPERSEDED**: retained to explain how the final formulation was reached.
 
-## Final Evidence
+## Direct-Quantity Evidence (Main Design)
+
+Following the supervisor's feedback this is the main formulation. Under the order-up-to decoder,
+`q = max(S - I, 0)` supplies monotonicity in inventory for every model, so the certificate only binds on the four
+economic inputs. Here the network emits the order with inventory as input 0, and all 37 input directions are
+certified. Three seeds, 2,400 epochs, 1,000 training products, profit objective, and the same 300 validation
+products as the target-stock controls; reproduced by
+`python scripts/run_direct_quantity_comparison.py train` followed by `summarize`.
+
+| Policy | Reward | Regret | Products violating | Order drop per unit of stock | Params | Status |
+|---|---:|---:|---:|---:|---:|---|
+| Raw-action MonoKAN | `4206.43 +/- 17.56` | `15.71%` | `0.0%` | `-0.524` | 4,265 | FINAL MAIN |
+| Raw-action KAN, constraint removed | `4229.31 +/- 10.88` | `13.33%` | `35.1%` | `-0.541` | 4,265 | FINAL CONTROL |
+| Raw-action paper FCNN | `3874.38 +/- 622.50` | `20.64%` | `0.0%` | `-0.339` | 2,105 | FINAL CONTROL |
+| Omniscient base stock, same sweep | `4297.45` | `0.00%` | `0.0%` | `-0.903` | - | REFERENCE |
+
+The certificate binds here. The unconstrained KAN orders more as stock rises on 35.1%
+of products (45.3%, 8.7%, 51.3% by seed); the certified model is at 0% by construction. The violations are
+widespread and not always small: 3.7% of swept steps, and the worst rise is
+`0.109` mean-demand units, about 11% of a day's demand. The violation rate is architecture dependent: the
+feed-forward arm violates on 0.0% of products. The FCNN arm is unstable: seed 2027 collapsed to `3155.76` (`42.43%` regret), as the same seed did at 400 epochs; the other seeds average `4233.69`, above the certified model, so its three-seed mean understates what a successful run achieves.
+
+It is also not free here. Paired over the 300 products (seed-averaged), MonoKAN minus the unconstrained KAN is
+`-22.89` per period, 95% CI `[-32.57, -13.20]`, paired t `p < 0.0001`,
+Wilcoxon `p < 0.0001`; MonoKAN is ahead on 28% of products. Under the
+target-stock decoder at the same budget the certificate cost nothing (`-0.08`, `p = 0.94`), because the subtraction
+already enforced the inventory direction.
+
+No direct-quantity policy reacts to stock with more than 60% of the omniscient policy's
+`-0.90` on the same sweep, and none beats the classical rules that see the same information, the last 32 observations re-estimated daily
+(`1.25%` Gamma fit, `1.90%` empirical quantile). The matched
+target-stock MonoKAN reaches `1.62%` regret at the same 1,000 products and 2,400 epochs: the decoder supplies the
+ordering strength, the certificate only the direction.
+
+A 400-epoch pilot of the same comparison (superseded) gave the same qualitative picture: 48.1% of products violating
+for the unconstrained KAN, 0% for the certified model and the FCNN, and a cost of about 66 per period.
+
+Interpretability, by the test of Maggiar et al. (2025, Figure 3): the order a direct-quantity policy places at zero
+stock is its implied order-up-to level. Per unit of mean demand, which removes product scale, MonoKAN's implied level
+correlates `0.49` with the omniscient level, against `0.93` for the classical Gamma fit on the same 32-day history; in
+raw units scale alone makes every policy look good. The certificate fixes each input's direction, not the level.
+Speed: `0.41` ms per decision for MonoKAN against `0.20` ms for the FCNN (median CPU time, one decision); 10,000
+decisions at once take about `57` ms. Reproduced by `run_direct_quantity_comparison.py interpret`; the
+order-versus-stock curves of the worst break come from `run_direct_quantity_comparison.py curves`.
+
+## Target-Stock Evidence (Alternative Design)
 
 | Experiment | Report role | Reward | Regret | Config | Status |
 |---|---|---:|---:|---|---|
@@ -43,48 +88,49 @@ partner, where MonoKAN leads the unconstrained KAN by `+6.73` per period
 (`p = 0.0001`). Comparing an arm across those two blocks confounds the decoder
 with the level network.
 
-## Direct-Quantity Evidence
+## Target Stock: MonoKAN Against The Same KAN In Every Information Window
 
-Under the order-up-to decoder, `q = max(S - I, 0)` supplies monotonicity in
-inventory for every model, so the certificate only binds on the four economic
-inputs. The direct-quantity formulation removes the subtraction: the network emits
-the order with inventory as input 0, and the property has to be certified. Three
-seeds, 400 epochs, `configs/paper_lost_sales_rolling_direct_target_dev_1k_normalized.yaml`,
-300 validation products, reproduced by `scripts/run_direct_quantity_comparison.py`.
+The core monotonicity test of the alternative design: the same soft-quantile policy with the certified MonoKAN level
+network and with the identical KAN without the certificate (`monokan.level_network: kan`, same parameter count,
+1,892). Final setup (5,000 products, weighted objective, 2,400 epochs) in all three information windows, three seeds,
+the same 300 validation products. Regret:
 
-| Policy | Reward | Products violating | Order drop per unit of stock | Params | Status |
-|---|---:|---:|---:|---:|---|
-| Raw-action MonoKAN | `4094.87` | `0.0%` | `-0.151` | 4,265 | FINAL MAIN |
-| Raw-action KAN, constraint removed | `4160.95` | `48.1%` | `-0.242` | 4,265 | FINAL CONTROL |
-| Raw-action paper FCNN | `3824.74` | `0.0%` | `-0.246` | 2,105 | FINAL CONTROL |
+| Information | Classical Gamma fit | Classical empirical quantile | KAN, no certificate | MonoKAN |
+|---|---:|---:|---:|---:|
+| Initial 32 lags, never updated (`monokan.roll_history: false`) | `1.35%` | `1.76%` | `2.37%` | `2.04%` |
+| Last 32 observations (`monokan.window_mode: sliding`) | `1.25%` | `1.90%` | `1.96%` | `1.83%` |
+| All demand so far (final config) | `0.18%` | `0.27%` | `0.87%` | `0.80%` |
 
-The violation rate is architecture dependent. The unconstrained KAN violates on
-44-52% of products in every seed, which is the failure mode the proposal predicted;
-the feed-forward network does not violate at all. Violations are widespread but
-mild: 3.4-4.3% of swept steps, worst rise `0.015` mean-demand units.
+MonoKAN has the lower regret in every window. Paired over the 300 products (rewards averaged over seeds), MonoKAN
+minus KAN, reward per period:
 
-Unlike the target-stock controls, the certificate is not free here: the
-unconstrained KAN earns `+66` per period over the certified model. No direct-quantity
-policy approaches the ideal slope of `-1.00`, and all lose to the target-stock
-policy's `4285.53`, so the decoder supplies ordering strength while the certificate
-supplies direction. The FCNN arm is unstable across seeds (`3140.9` to `4182.2`).
+| Setting | Difference | 95% CI | paired t | Wilcoxon | MonoKAN ahead | Reading |
+|---|---:|---:|---:|---:|---:|---|
+| Final setup, all demand | `-0.44` | `[-1.97, +1.08]` | `0.569` | `0.0001` | 61% | tie on average, ahead on most products |
+| Final setup, last 32 observations | `+1.81` | `[+0.16, +3.46]` | `0.032` | `< 0.0001` | 62% | small but consistent |
+| Final setup, initial 32 lags | `+2.64` | `[+0.17, +5.10]` | `0.036` | `0.464` | 51% | small and borderline |
+| 1,000 products, profit objective, last 32 observations | `+5.90` | `[+3.32, +8.48]` | `< 0.0001` | `< 0.0001` | 72% | clearly helps |
 
-## Superseded Evidence
+Rewards behind the table (MonoKAN / KAN): `4285.53` / `4285.97`, `4255.32` / `4253.51`, `4249.02` / `4246.38`, and
+`4260.45` / `4254.55`; the last row's regrets are `2.26%` / `3.35%`. In no setting is MonoKAN significantly behind.
+The earlier sliding-window, running-mean block above (`+6.73`, `p = 0.0001`) points the same way; it is kept as an
+independent check, since its decoder differs from every row here.
 
-These runs characterise the DeepGrid7 MonoKAN that the soft-quantile policy replaced. They are retained because they explain how the original result was reached and why particular explanations for it were ruled out. Numbers are reward per period on the 300-product protocol; regret was not computed for these runs.
+### The Two Designs Under Matched Training And Information
 
-| Experiment | Question it answered | Result | Config |
-|---|---|---:|---|
-| Paper raw-action FCNN anchor | Can the pipeline reproduce a strong paper-style FCNN? | `4580.54 +/- 4.09` | `configs/paper_lost_sales_raw_fcnn_replication_5k.yaml` |
-| Compact vs DeepGrid7 MonoKAN | Does MonoKAN capacity explain the gap? Partly. | DeepGrid7 `4185.19`, compact `4126.50` | `configs/paper_lost_sales_direct_target_capacity_medium.yaml` |
-| 1k vs 5k training products | Does more data explain the gap? No. | 5k DeepGrid7 `4192.54 +/- 1.10` | `configs/paper_lost_sales_direct_target_capacity_5k.yaml` |
-| 500 vs 1,000 epochs | Does optimisation time explain the gap? No. | `4196.20` at 1,000 epochs | `configs/paper_lost_sales_direct_target_capacity_5k_1000e.yaml` |
-| Temporal DeepGrid7 MonoKAN | Do causal temporal summaries help? Slightly, but they break the certificate. | `4135.64 +/- 9.08`; about `37.5%` raw-demand reversals | `configs/paper_lost_sales_rolling_direct_target_temporal_dev_1k_normalized.yaml` |
-| Supervised target-fitting diagnostic | Is the limit representational or reward-driven? | DeepGrid7 fits the target map better than compact models | `configs/paper_lost_sales_base_stock_small.yaml` |
+1,000 training products, 2,400 epochs, profit objective, three seeds, the same 300 validation products, and both
+designs see only the last 32 observations of demand:
 
-The capacity, data-scale, and epoch ablations each ruled out one explanation for the shipped model's weakness. The explanation they were missing was the spline grid; see `docs/DEBUGGING.md`.
+| | Direct quantity | Target stock |
+|---|---:|---:|
+| Who enforces "more stock, never a larger order" | the certificate | the subtraction in `max(S - I, 0)` |
+| Unconstrained arm: products that order more as stock rises | `35.1%` | `0%` (impossible) |
+| Certificate against the same KAN, reward per period | `-22.89` (`p < 0.0001`) | `+5.90` (`p < 0.0001`) |
+| MonoKAN regret | `15.71%` | `2.26%` |
 
-The raw-action FCNN anchor is not comparable to the target-stock rows: it uses a different product draw and validation size, so its higher reward reflects a different product population, not a better policy.
+The certificate costs profit exactly where it does the work of enforcing the stock rule; where the structure already
+does that work it is free, and in this smaller setup it helps. With all demand observed so far the matched
+target-stock MonoKAN reaches `1.62%`.
 
 ## Classical Baselines
 
@@ -93,11 +139,19 @@ Evaluated on the same products and demand paths. Information access matters and 
 | Baseline | Information | Reward | Regret |
 |---|---|---:|---:|
 | Omniscient base stock | true Gamma parameters | `4297.45` | `0.00%` |
-| Expanding-window empirical quantile | all demand observed so far | `4290.64` | `0.27%` |
+| Gamma fit | all demand observed so far | `4294.02` | `0.18%` |
+| Empirical quantile | all demand observed so far | `4290.64` | `0.27%` |
 | Running mean of rolling 32-window quantile | all demand observed so far | `4282.26` | `0.44%` |
-| Gamma fit | initial 32 lags | `4274.91` | `1.35%` |
-| Empirical quantile | initial 32 lags | `4264.52` | `1.76%` |
-| Rolling 32-window quantile | last 32 observations | `4255.93` | `1.90%` |
+| Gamma fit | last 32 observations, re-estimated daily | `4275.37` | `1.25%` |
+| Gamma fit | initial 32 lags, never updated | `4274.91` | `1.35%` |
+| Empirical quantile | initial 32 lags, never updated | `4264.52` | `1.76%` |
+| Empirical quantile | last 32 observations, re-estimated daily | `4255.93` | `1.90%` |
+
+The "initial 32 lags" rows are the paper's benchmark definition (one estimate, never updated); "last 32
+observations" is what a policy in daily use sees and exactly the information of the direct-quantity design; "all
+demand observed so far" is the information of the final target-stock decoder. `scripts/run_classical_windows.py`
+reproduces every window cell. The Gamma fit is additionally told the demand family, so the empirical quantile is the
+fairer partner for a learned policy.
 
 The learned policy is competitive with, but does not beat, a well-specified classical estimator at matched information. Quoting only the fixed 32-lag baselines overstates the learned policy's standing, because the final decoder uses an expanding window.
 
@@ -197,3 +251,37 @@ Confirmation on 3,000 validation products, a strict superset of the 300 used for
 The absolute reward level differs from the 300-product tables because a different product draw has a different mean; that is the population uncertainty above, not a change in policy behaviour. The ordering is unchanged on ten times the products.
 
 Report paired differences and regret as primary evidence, quote absolute rewards to few significant figures, and label which standard error is which.
+
+## Superseded Evidence
+
+These runs characterise the DeepGrid7 MonoKAN that the soft-quantile policy replaced. They are retained because they explain how the original result was reached and why particular explanations for it were ruled out. Numbers are reward per period on the 300-product protocol; regret was not computed for these runs.
+
+| Experiment | Question it answered | Result | Config |
+|---|---|---:|---|
+| Paper raw-action FCNN anchor | Can the pipeline reproduce a strong paper-style FCNN? | `4580.54 +/- 4.09` | `configs/paper_lost_sales_raw_fcnn_replication_5k.yaml` |
+| Compact vs DeepGrid7 MonoKAN | Does MonoKAN capacity explain the gap? Partly. | DeepGrid7 `4185.19`, compact `4126.50` | `configs/paper_lost_sales_direct_target_capacity_medium.yaml` |
+| 1k vs 5k training products | Does more data explain the gap? No. | 5k DeepGrid7 `4192.54 +/- 1.10` | `configs/paper_lost_sales_direct_target_capacity_5k.yaml` |
+| 500 vs 1,000 epochs | Does optimisation time explain the gap? No. | `4196.20` at 1,000 epochs | `configs/paper_lost_sales_direct_target_capacity_5k_1000e.yaml` |
+| Temporal DeepGrid7 MonoKAN | Do causal temporal summaries help? Slightly, but they break the certificate. | `4135.64 +/- 9.08`; about `37.5%` raw-demand reversals | `configs/paper_lost_sales_rolling_direct_target_temporal_dev_1k_normalized.yaml` |
+| Supervised target-fitting diagnostic | Is the limit representational or reward-driven? | DeepGrid7 fits the target map better than compact models | `configs/paper_lost_sales_base_stock_small.yaml` |
+
+The capacity, data-scale, and epoch ablations each ruled out one explanation for the shipped model's weakness. The explanation they were missing was the spline grid; see `docs/DEBUGGING.md`. Their configs, the temporal-summary config and the supervised diagnostic were removed from the tree after commit `226f001`.
+
+The raw-action FCNN anchor is not comparable to the target-stock rows: it uses a different product draw and validation size, so its higher reward reflects a different product population, not a better policy.
+
+## Reproduction
+
+All commands run from the repository root; each target-stock command trains one seed (repeat for 2025, 2026, 2027).
+
+| Evidence | Command |
+|---|---|
+| Direct quantity, all three arms | `python scripts/run_direct_quantity_comparison.py train --out outputs/direct_quantity`, then `summarize`, `interpret` and `curves` on that directory |
+| Final target-stock policy | `python scripts/run_soft_quantile_monokan.py --seed 2025 --output-dir outputs/ts_monokan/seed_2025` |
+| Same policy, KAN without the certificate | add `--set monokan.level_network=kan` |
+| Last 32 observations only | add `--set monokan.window_mode=sliding` |
+| Initial 32 lags, never updated | add `--set monokan.roll_history=false` |
+| Matched to the direct-quantity training | `--config configs/paper_lost_sales_soft_quantile_monokan_profit.yaml --set epochs=2400 --set idp_benchmark.compact.reward_epochs=2400 --set idp_benchmark.compact.validation_interval=150 --set monokan.window_mode=sliding` |
+| Regret and paired tests of saved runs | `python scripts/compare_target_stock_runs.py summary <run roots>` and `pair <first> <second>` |
+| Classical rules in every information window | `python scripts/run_classical_windows.py` |
+| Structural audit and interpretability | `scripts/run_direct_target_structural_audit.py`, `scripts/run_monokan_interpretability.py` |
+| Historical DeepGrid7 and FCNN direct target stock | `python scripts/run_base_stock_output_experiment.py --config configs/paper_lost_sales_rolling_direct_target_dev_1k_normalized.yaml` |
