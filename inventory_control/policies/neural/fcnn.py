@@ -10,7 +10,7 @@ try:
     import torch
     from torch import nn
 except ImportError as exc:  # pragma: no cover
-    raise ImportError("Install neural dependencies with `python -m pip install -r requirements-neural.txt`.") from exc
+    raise ImportError("Install the neural dependencies with `python -m pip install -e '.[neural]'`.") from exc
 
 from inventory_control.products import PaperLostSalesProduct
 from inventory_control.paper_lost_sales import historical_empirical_quantile, paper_critical_quantile

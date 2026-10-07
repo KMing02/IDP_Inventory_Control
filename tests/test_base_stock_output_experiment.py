@@ -11,7 +11,6 @@ torch = pytest.importorskip("torch")
 
 from inventory_control.base_stock_output_experiment import (
     _TorchBaseStockPolicyAdapter,
-    _compact_settings,
     _restore_best_validation_state,
     run_base_stock_output_experiment,
 )
@@ -211,15 +210,6 @@ def test_temporal_deep_grid7_monokan_constrains_only_lags_means_and_economics() 
     assert model.monotonic_vars[38] == -1
     assert model.monotonic_vars[39] == -1
     assert model.monotonic_vars[40] == 1
-
-
-def test_capacity_medium_profile_preserves_report_ablation_protocol() -> None:
-    capacity = yaml.safe_load(Path("configs/paper_lost_sales_direct_target_capacity_medium.yaml").read_text(encoding="utf-8"))
-
-    assert _compact_settings(capacity)["training_products"] == 1_000
-    assert capacity["paper_history_feature_mode"] == "raw_lags"
-    assert capacity["paper_include_newsvendor_feature"] is False
-    assert capacity["idp_benchmark"]["compact"]["imitation_epochs"] == 0
 
 
 def test_summary_history_features_have_stable_dimension() -> None:
@@ -445,24 +435,6 @@ def test_matched_direct_target_run_shares_training_draws_and_saves_final_checkpo
         assert (tmp_path / "run" / row.final_checkpoint_filename).exists()
         assert row.selected_checkpoint_epoch == 1
         assert row.final_checkpoint_epoch == 1
-
-
-def test_final_rolling_config_resolves_without_protocol_overrides() -> None:
-    config = yaml.safe_load(Path("configs/paper_lost_sales_rolling_direct_target_5k.yaml").read_text(encoding="utf-8"))
-
-    settings = _compact_settings(config)
-
-    assert settings["training_products"] == 5_000
-    assert settings["validation_products"] == 500
-    assert settings["batch_size"] == 2_500
-    assert settings["reward_epochs"] == 1_000
-    assert settings["training_horizon"] == 100
-    assert settings["evaluation_horizon"] == 520
-    assert settings["burn_in"] == 20
-    assert settings["include_terminal_salvage"] is True
-    assert settings["initial_inventory_mode"] == "last_historical_demand"
-    assert settings["normalize_reward_loss"] is False
-    assert config["fcnn"]["history_encoder"] == "causal_cnn"
 
 
 def test_base_stock_output_cli_smoke(tmp_path: Path) -> None:

@@ -13,6 +13,7 @@ from inventory_control.paper_lost_sales import (
     paper_evaluation_demand_path,
     oracle_gamma_base_stock_policy,
     paper_lost_sales_step,
+    WindowedBaseStockPolicy,
 )
 from inventory_control.paper_evaluation import PAPER_TEST_EVALUATION_SEED_START, paper_test_product_count
 from inventory_control.products import PaperLostSalesProduct, PaperLostSalesProductGenerator
@@ -397,3 +398,46 @@ def test_paper_evaluation_uses_stored_future_trace_when_available() -> None:
     )
 
     assert first["mean_total_reward"] == second["mean_total_reward"]
+
+
+def test_fixed_window_rules_reproduce_the_paper_benchmarks() -> None:
+    product = PaperLostSalesProductGenerator(_paper_table_config()).generate(1, "validation")[0]
+
+    percentile = WindowedBaseStockPolicy(product, estimator="percentile", window="fixed")
+    gamma = WindowedBaseStockPolicy(product, estimator="gamma", window="fixed")
+    percentile.observe_demand(10_000.0)
+
+    assert percentile.level == pytest.approx(historical_demand_base_stock_policy(product).S)
+    assert gamma.level == pytest.approx(non_omniscient_gamma_base_stock_policy(product).S)
+
+
+def test_rolling_window_forgets_and_expanding_window_remembers() -> None:
+    product = PaperLostSalesProductGenerator(_paper_table_config()).generate(1, "validation")[0]
+    history = [float(value) for value in product.historical_demand]
+    new_demand = [500.0, 0.0, 250.0]
+    rolling = WindowedBaseStockPolicy(product, window="rolling", length=4)
+    expanding = WindowedBaseStockPolicy(product, window="expanding")
+
+    for demand in new_demand:
+        rolling.observe_demand(demand)
+        expanding.observe_demand(demand)
+
+    quantile = paper_critical_quantile(product)
+    assert rolling.level == pytest.approx(np.quantile((history + new_demand)[-4:], quantile))
+    assert expanding.level == pytest.approx(np.quantile(history + new_demand, quantile))
+    assert rolling.act(inventory=rolling.level + 1.0, t=0) == 0.0
+
+
+def test_windowed_rule_restarts_from_the_initial_history_every_episode() -> None:
+    product = PaperLostSalesProductGenerator(_paper_table_config()).generate(1, "validation")[0]
+    policy = WindowedBaseStockPolicy(product, window="expanding")
+    start_level = policy.level
+
+    evaluate_paper_lost_sales_policy(product, policy, horizon=6, n_episodes=1, seed=3)
+    assert policy.level != pytest.approx(start_level)
+    policy.reset()
+
+    assert policy.level == pytest.approx(start_level)
+    with pytest.raises(ValueError, match="window"):
+        WindowedBaseStockPolicy(product, window="weekly")
+

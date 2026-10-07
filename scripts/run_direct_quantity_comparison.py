@@ -1,125 +1,79 @@
-"""Direct-quantity comparison: where does the monotone constraint actually bind?
-
-The target-stock decoder gets "order less when stock is higher" from
-q = max(S - I, 0), so it holds for every model and the certified constraint only
-covers the economics. Here the network emits the order itself with inventory as
-an input, so the property has to come from the model. This trains three
-direct-quantity policies and reports both profit and how often each one breaks
-the property.
+"""Direct-quantity comparison (main design): MonoKAN, the same KAN without the certificate, and the paper FCNN.
 
 Usage:
-    python scripts/run_direct_quantity_comparison.py monokan,kan,fcnn 2025,2026,2027 400 results.json
+    python scripts/run_direct_quantity_comparison.py train --models monokan,kan,fcnn \
+        --seeds 2025,2026,2027 --epochs 2400 --out outputs/direct_quantity
+    python scripts/run_direct_quantity_comparison.py summarize outputs/direct_quantity
+    python scripts/run_direct_quantity_comparison.py interpret outputs/direct_quantity
+    python scripts/run_direct_quantity_comparison.py curves outputs/direct_quantity
+
+Every (model, seed) run writes its own result file and checkpoint, so ``train`` can run in parallel processes,
+for example one per model.
 """
-import json, sys, time
-import numpy as np, torch
-torch.set_num_threads(6)
-from inventory_control.paper_configs import load_paper_lost_sales_config
-from inventory_control.products import PaperLostSalesProductGenerator
-from inventory_control.policies.neural.fcnn import (compute_paper_fcnn_feature_stats, make_paper_fcnn_model,
-                                                    build_paper_lost_sales_features)
-from inventory_control.policies.neural.monokan import make_paper_raw_action_monokan_model_for_products
-from inventory_control.base_stock_output_experiment import _compact_settings
-from inventory_control.evaluation.torch_policy import batched_torch_policy_metrics
-from inventory_control.training.direct_backprop import train_paper_lost_sales_fcnn
 
-CONFIG = "configs/paper_lost_sales_rolling_direct_target_dev_1k_normalized.yaml"
-KAN_METADATA = {"hidden_layers": 1, "hidden_units": 8, "grid": 5,
-                "adaptive_grid": True, "adaptive_grid_eps": 0.1, "sort_history_lags": True}
+from __future__ import annotations
 
+import argparse
+import json
+from pathlib import Path
 
-def build(name, config, products, feature_stats):
-    if name == "fcnn":
-        return make_paper_fcnn_model(config)
-    metadata = dict(KAN_METADATA, monotone=(name == "monokan"))
-    return make_paper_raw_action_monokan_model_for_products(config, products, feature_stats, metadata=metadata)
+import numpy as np
+import torch
+
+from inventory_control.direct_quantity_experiment import (
+    MODELS,
+    implied_order_up_to,
+    largest_violation_curves,
+    summarize_runs,
+    train_and_evaluate,
+)
 
 
-def inventory_response(model, products, feature_stats):
-    """Sweep on-hand stock with everything else fixed.
-
-    Two things matter. Sign: does the order ever rise when stock rises? Strength:
-    an order-up-to rule lowers the order one-for-one with stock, so the ideal
-    slope is -1 and a slope near 0 means the policy is ignoring its inventory.
-    The slope is read over the range a sensible policy actually visits.
-    """
-    products_hit, bad_steps, steps, worst = 0, 0, 0, 0.0
-    slopes = []
-    with torch.no_grad():
-        for product in products:
-            mean_demand = max(float(np.mean(product.historical_demand)), 1.0)
-            grid = np.linspace(0.0, 4.0 * mean_demand, 25)
-            feats = torch.tensor([build_paper_lost_sales_features(
-                inventory=float(inventory), historical_demand=product.historical_demand, price=product.price,
-                purchase_cost=product.purchase_cost, holding_cost=product.holding_cost,
-                lost_sale_penalty=product.lost_sale_penalty, feature_stats=feature_stats) for inventory in grid],
-                dtype=torch.float32)
-            orders = model(feats).numpy() * mean_demand
-            rises = np.diff(orders)
-            flagged = rises > 1e-4 * mean_demand
-            bad_steps += int(flagged.sum()); steps += len(rises)
-            if flagged.any():
-                products_hit += 1
-                worst = max(worst, float(rises.max() / mean_demand))
-            near = grid <= 1.5 * mean_demand
-            slopes.append(float(np.polyfit(grid[near], orders[near], 1)[0]))
-    return {"products_with_any_violation_pct": 100 * products_hit / len(products),
-            "violating_steps_pct": 100 * bad_steps / steps,
-            "worst_rise_in_mean_demand_units": worst,
-            "mean_inventory_slope": float(np.mean(slopes)),
-            "inventory_slope_p10": float(np.percentile(slopes, 10)),
-            "inventory_slope_p90": float(np.percentile(slopes, 90))}
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+    train = commands.add_parser("train", help="train and evaluate (model, seed) runs")
+    train.add_argument("--models", default=",".join(MODELS))
+    train.add_argument("--seeds", default="2025,2026,2027")
+    train.add_argument("--epochs", type=int, default=2400)
+    train.add_argument("--threads", type=int, default=2)
+    train.add_argument("--out", type=Path, default=Path("outputs/direct_quantity"))
+    for name, text in (
+        ("summarize", "pool the run files into summary.json"),
+        ("interpret", "implied order-up-to level and decision speed (writes interpretability.json)"),
+        ("curves", "order-versus-stock curves where the KAN breaks the stock rule most (writes curves.json)"),
+    ):
+        command = commands.add_parser(name, help=text)
+        command.add_argument("run_dir", type=Path)
+    return parser.parse_args()
 
 
-def run(name, seed, epochs, config, train_products, val_products, feature_stats, settings):
-    torch.manual_seed(seed)
-    model = build(name, config, train_products, feature_stats)
-    params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    assert getattr(model, "paper_action_parameterization", None) == "raw", name
-    start = time.time()
-    result = train_paper_lost_sales_fcnn(
-        train_products, model, horizon=settings["training_horizon"],
-        batch_size=min(settings["batch_size"], len(train_products)), epochs=epochs,
-        learning_rate=settings["learning_rate"], seed=seed, imitation_epochs=0,
-        validation_products=val_products, validation_interval=max(epochs // 8, 1), feature_stats=feature_stats,
-        max_order_factor=settings["max_order_factor"], normalize_reward_loss=False,
-        training_demand_mode=settings["training_demand_mode"], history_feature_mode="raw_lags",
-        include_terminal_salvage=settings["include_terminal_salvage"],
-        initial_inventory_mode=settings["initial_inventory_mode"], enforce_action_cap=False,
-        scale_action_by_history_mean=True, device="cpu")
-    if result.best_state_dict:
-        model.load_state_dict(result.best_state_dict)
-    model.eval()
-    metrics = batched_torch_policy_metrics(val_products, model, feature_stats,
-                                           settings={**settings, "scale_action_by_history_mean": True},
-                                           split="validation")
-    row = {"model": name, "seed": seed, "params": params, "train_seconds": round(time.time() - start),
-           "reward_per_period": float(metrics["mean_reward_per_period"].mean())}
-    row.update(inventory_response(model, val_products, feature_stats))
-    print(json.dumps(row), flush=True)
-    return row
+def main() -> None:
+    args = parse_args()
+    if args.command == "train":
+        torch.set_num_threads(args.threads)
+        for name in args.models.split(","):
+            for seed in (int(value) for value in args.seeds.split(",")):
+                row = train_and_evaluate(name, seed, args.epochs, args.out)
+                print(json.dumps({key: value for key, value in row.items() if key != "per_product_reward"}), flush=True)
+    elif args.command == "summarize":
+        print(json.dumps(summarize_runs(args.run_dir), indent=1))
+    elif args.command == "interpret":
+        torch.set_num_threads(4)
+        results = implied_order_up_to(args.run_dir)
+        (args.run_dir / "interpretability.json").write_text(json.dumps(results, indent=1), encoding="utf-8")
+        for name, rows in results.items():
+            def mean(key: str) -> float:
+                return float(np.mean([row[key] for row in rows]))
 
-
-def main():
-    names = sys.argv[1].split(",")
-    seeds = [int(s) for s in sys.argv[2].split(",")]
-    epochs = int(sys.argv[3])
-    out_path = sys.argv[4]
-    config = load_paper_lost_sales_config(CONFIG)
-    settings = _compact_settings(config)
-    generator = PaperLostSalesProductGenerator(config)
-    train_products = generator.generate(settings["training_products"], split="train")
-    val_products = generator.generate(settings["validation_products"], split="validation")
-    feature_stats = compute_paper_fcnn_feature_stats(train_products)
-    rows = [run(name, seed, epochs, config, train_products, val_products, feature_stats, settings)
-            for name in names for seed in seeds]
-    json.dump(rows, open(out_path, "w"), indent=1)
-    print("\n== mean over seeds ==", flush=True)
-    for name in names:
-        subset = [r for r in rows if r["model"] == name]
-        print(f"{name:8s} params={subset[0]['params']:6d} "
-              f"reward={np.mean([r['reward_per_period'] for r in subset]):9.2f} "
-              f"violating_products={np.mean([r['products_with_any_violation_pct'] for r in subset]):6.1f}% "
-              f"slope={np.mean([r['mean_inventory_slope'] for r in subset]):7.3f} (ideal -1.0)", flush=True)
+            print(f"{name:8s} params {rows[0]['params']:5d} | implied vs optimal level: corr {mean('raw_corr'):.3f}, "
+                  f"per unit of demand {mean('scaled_corr'):.3f} | {mean('ms_one'):.3f} ms per decision, "
+                  f"{mean('ms_10k'):.1f} ms per 10,000")
+    else:
+        curves = largest_violation_curves(args.run_dir)
+        (args.run_dir / "curves.json").write_text(json.dumps(curves), encoding="utf-8")
+        print(f"product {curves['product_index']}, seed {curves['seed']}: largest KAN rise "
+              f"{curves['largest_rise_share'] * 100:.2f}% of a day's demand")
 
 
 if __name__ == "__main__":

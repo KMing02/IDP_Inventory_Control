@@ -10,7 +10,7 @@ import time
 try:
     import torch
 except ImportError as exc:  # pragma: no cover
-    raise ImportError("Install neural dependencies with `python -m pip install -r requirements-neural.txt`.") from exc
+    raise ImportError("Install the neural dependencies with `python -m pip install -e '.[neural]'`.") from exc
 
 from torch import nn
 from torch.utils.checkpoint import checkpoint

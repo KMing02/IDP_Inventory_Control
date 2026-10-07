@@ -194,22 +194,32 @@ def gamma_quantile_exact(shape: float, scale: float, quantile: float) -> float:
     return float(scipy_gamma.ppf(float(np.clip(quantile, 0.0, 1.0)), a=float(shape), scale=float(scale)))
 
 
-def historical_empirical_quantile(product: PaperLostSalesProduct, quantile: float) -> float:
-    """Estimate demand quantile from historical demand only."""
-    return float(np.quantile(product.historical_demand, quantile))
+def empirical_demand_quantile(demand, quantile: float) -> float:
+    """Empirical quantile of observed demand."""
+    return float(np.quantile(np.asarray(demand, dtype=float), quantile))
 
 
-def historical_gamma_quantile(product: PaperLostSalesProduct, quantile: float) -> float:
-    """Estimate a Gamma quantile from historical mean/CV, without true parameters."""
-    history = np.asarray(product.historical_demand, dtype=float)
-    mean = float(history.mean())
-    std = float(history.std(ddof=0))
+def gamma_moment_quantile(demand, quantile: float) -> float:
+    """Gamma quantile from a method-of-moments fit (mean and population CV) to observed demand."""
+    values = np.asarray(demand, dtype=float)
+    mean = float(values.mean())
+    std = float(values.std(ddof=0))
     if mean <= 0:
         return 0.0
     cv = max(std / mean, 1e-6)
     shape = 1.0 / (cv**2)
     scale = mean / shape
     return gamma_quantile_exact(shape, scale, quantile)
+
+
+def historical_empirical_quantile(product: PaperLostSalesProduct, quantile: float) -> float:
+    """Estimate demand quantile from historical demand only."""
+    return empirical_demand_quantile(product.historical_demand, quantile)
+
+
+def historical_gamma_quantile(product: PaperLostSalesProduct, quantile: float) -> float:
+    """Estimate a Gamma quantile from historical mean/CV, without true parameters."""
+    return gamma_moment_quantile(product.historical_demand, quantile)
 
 
 def omniscient_gamma_base_stock_policy(product: PaperLostSalesProduct) -> BaseStockOrderPolicy:
@@ -249,6 +259,65 @@ def historical_demand_base_stock_policy(
     )
     name = "NonOmniscientOptimal" if fit_gamma else "HistoricalDemandBaseStock"
     return BaseStockOrderPolicy(S=stock_level, name=name)
+
+
+class WindowedBaseStockPolicy:
+    """Classical base-stock rule that re-estimates its order-up-to level from the demand it observes.
+
+    ``window`` sets the information the estimator uses, so a learned policy can be compared with a classical rule
+    that sees exactly the same data:
+
+    - ``"fixed"``: the initial history only, never updated (how the paper defines its benchmarks);
+    - ``"rolling"``: the last ``length`` observations, re-estimated every period;
+    - ``"expanding"``: every observation so far, the initial history included.
+
+    ``estimator`` is ``"percentile"`` (empirical quantile) or ``"gamma"`` (method-of-moments Gamma fit). With
+    ``window="fixed"`` the two reproduce ``HistoricalDemandBaseStock`` and ``NonOmniscientOptimal``.
+    """
+
+    WINDOWS = ("fixed", "rolling", "expanding")
+    ESTIMATORS = ("percentile", "gamma")
+
+    def __init__(
+        self,
+        product: PaperLostSalesProduct,
+        estimator: str = "percentile",
+        window: str = "fixed",
+        length: int = 32,
+    ) -> None:
+        if estimator not in self.ESTIMATORS:
+            raise ValueError(f"estimator must be one of {self.ESTIMATORS}")
+        if window not in self.WINDOWS:
+            raise ValueError(f"window must be one of {self.WINDOWS}")
+        self.product = product
+        self.estimator = estimator
+        self.window = window
+        self.length = int(length)
+        self.quantile = paper_critical_quantile(product)
+        self.name = f"{estimator.capitalize()}{window.capitalize()}BaseStock"
+        self.reset()
+
+    def _estimate(self, demand: list[float]) -> float:
+        if self.estimator == "percentile":
+            return empirical_demand_quantile(demand, self.quantile)
+        return gamma_moment_quantile(demand, self.quantile)
+
+    def reset(self) -> None:
+        """Start an episode from the product's initial history."""
+        self.history = [float(value) for value in self.product.historical_demand]
+        self.level = self._estimate(self.history)
+
+    def act(self, inventory: float, t: int, rng=None) -> float:
+        """Order up to the current level."""
+        return max(self.level - float(inventory), 0.0)
+
+    def observe_demand(self, demand: float) -> None:
+        """Record the period's demand and re-estimate the level, unless the window is fixed."""
+        if self.window == "fixed":
+            return
+        self.history.append(float(demand))
+        window = self.history[-self.length:] if self.window == "rolling" else self.history
+        self.level = self._estimate(window)
 
 
 def monotonicity_violation_rate(
