@@ -48,7 +48,10 @@ KAN_METADATA = {
     "adaptive_grid_eps": 0.1,
     "sort_history_lags": True,
 }
-MODELS = ("monokan", "kan", "fcnn")
+# ``kan`` is the unconstrained KAN as run for the report (constant initial output); ``kan_open`` is the same network
+# initialised exactly like MonoKAN (open readout), which separates the constraint from the initialisation.
+MODELS = ("monokan", "kan", "kan_open", "fcnn")
+REPORTED_MODELS = ("monokan", "kan", "fcnn")
 SEEDS = (2025, 2026, 2027)
 
 
@@ -80,12 +83,14 @@ def load_setup(config_path: str | Path = CONFIG) -> DirectQuantitySetup:
 
 
 def build_model(name: str, setup: DirectQuantitySetup) -> nn.Module:
-    """Build one of ``MODELS``: ``monokan`` (certified), ``kan`` (same network, no certificate) or ``fcnn``."""
+    """Build one of ``MODELS``: ``monokan`` (certified), ``kan`` / ``kan_open`` (no certificate) or ``fcnn``."""
     if name not in MODELS:
         raise ValueError(f"model must be one of {MODELS}")
     if name == "fcnn":
         return make_paper_fcnn_model(setup.config)
     metadata = dict(KAN_METADATA, monotone=(name == "monokan"))
+    if name == "kan_open":
+        metadata["initialization"] = "open"
     return make_paper_raw_action_monokan_model_for_products(
         setup.config, setup.train_products, setup.feature_stats, metadata=metadata
     )
@@ -219,15 +224,13 @@ def train_and_evaluate(name: str, seed: int, epochs: int, out_dir: str | Path,
 def summarize_runs(out_dir: str | Path) -> dict[str, Any]:
     """Pool the per-run result files of ``out_dir`` and write ``summary.json``.
 
-    ``monokan_minus_kan`` is the profit gap between the certified and the unconstrained model (same architecture,
-    different output initialisation), paired over the shared products with rewards averaged over seeds.
+    ``monokan_minus_kan`` is the profit gap between the certified and the unconstrained model as reported (same
+    architecture, different output initialisation); ``monokan_minus_kan_open`` compares with the unconstrained model
+    initialised like MonoKAN, so it isolates the constraint. Both are paired over the shared products with rewards
+    averaged over seeds.
     """
     out_dir = Path(out_dir)
-    rows = [
-        json.loads(path.read_text(encoding="utf-8"))
-        for path in sorted(out_dir.glob("*_*.json"))
-        if path.stem.split("_")[0] in MODELS
-    ]
+    rows = [json.loads(path.read_text(encoding="utf-8")) for _, _, path in _run_files(out_dir, ".json")]
     summary: dict[str, Any] = {}
     for name in MODELS:
         subset = [row for row in rows if row["model"] == name]
@@ -257,16 +260,34 @@ def summarize_runs(out_dir: str | Path) -> dict[str, Any]:
     def per_product(name: str) -> np.ndarray:
         return np.mean([row["per_product_reward"] for row in rows if row["model"] == name], axis=0)
 
-    if "monokan" in summary and "kan" in summary:
-        summary["monokan_minus_kan"] = paired_difference(per_product("monokan"), per_product("kan"))
+    for partner in ("kan", "kan_open"):
+        if "monokan" in summary and partner in summary:
+            summary[f"monokan_minus_{partner}"] = paired_difference(per_product("monokan"), per_product(partner))
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     return summary
 
 
+def _run_files(run_dir: str | Path, suffix: str) -> list[tuple[str, int, Path]]:
+    """(model, seed, path) of every ``<model>_<seed><suffix>`` file of the comparison in ``run_dir``."""
+    found = []
+    for path in sorted(Path(run_dir).glob(f"*_*{suffix}")):
+        model, _, seed = path.stem.rpartition("_")
+        if model in MODELS and seed.isdigit():
+            found.append((model, int(seed), path))
+    return found
+
+
+def saved_models(run_dir: str | Path) -> list[str]:
+    """Models of the comparison with at least one saved checkpoint, in ``MODELS`` order."""
+    present = {model for model, _, _ in _run_files(run_dir, ".pt")}
+    return [model for model in MODELS if model in present]
+
+
 def saved_seeds(run_dir: str | Path) -> list[int]:
-    """Seeds with a saved checkpoint for every model of the comparison."""
-    found = [{int(path.stem.split("_")[1]) for path in Path(run_dir).glob(f"{name}_*.pt")} for name in MODELS]
-    return sorted(set.intersection(*found))
+    """Seeds with a saved checkpoint for every model that has any checkpoint in ``run_dir``."""
+    runs = _run_files(run_dir, ".pt")
+    found = [{seed for model, seed, _ in runs if model == name} for name in saved_models(run_dir)]
+    return sorted(set.intersection(*found)) if found else []
 
 
 def load_trained(name: str, seed: int, run_dir: str | Path, setup: DirectQuantitySetup) -> nn.Module:
@@ -309,7 +330,7 @@ def implied_order_up_to(run_dir: str | Path, setup: DirectQuantitySetup | None =
     )
     one, batch = zero_stock[:1], zero_stock.repeat(10_000 // len(products) + 1, 1)[:10_000]
     results: dict[str, list[dict[str, float]]] = {}
-    for name in MODELS:
+    for name in saved_models(run_dir):
         per_seed = []
         for seed in seeds:
             model = load_trained(name, seed, run_dir, setup)

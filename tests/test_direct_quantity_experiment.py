@@ -5,9 +5,10 @@ import pytest
 import torch
 from torch import nn
 
-from inventory_control.direct_quantity_experiment import inventory_response, summarize_runs
+from inventory_control.direct_quantity_experiment import KAN_METADATA, inventory_response, saved_seeds, summarize_runs
 from inventory_control.paper_configs import load_paper_lost_sales_config
 from inventory_control.policies.neural.fcnn import compute_paper_fcnn_feature_stats
+from inventory_control.policies.neural.monokan import make_paper_raw_action_monokan_model_for_products
 from inventory_control.products import PaperLostSalesProductGenerator
 
 
@@ -69,3 +70,45 @@ def test_summary_pools_seeds_and_prices_the_certificate(tmp_path: Path) -> None:
     # Seed-averaged per product: MonoKAN (11, 21, 31) against KAN (13, 23.5, 34.5).
     assert summary["monokan_minus_kan"]["mean"] == pytest.approx(-8 / 3)
     assert (tmp_path / "summary.json").exists()
+
+
+def test_kan_open_starts_like_monokan_while_the_reported_kan_starts_constant() -> None:
+    config = load_paper_lost_sales_config("configs/paper_lost_sales_debug.yaml")
+    products = PaperLostSalesProductGenerator(config).generate(6, split="train")
+    stats = compute_paper_fcnn_feature_stats(products)
+
+    def build(**extra):
+        torch.manual_seed(0)
+        return make_paper_raw_action_monokan_model_for_products(
+            config, products, stats, metadata=dict(KAN_METADATA, **extra)
+        )
+
+    monokan, kan, kan_open = build(monotone=True), build(monotone=False), build(monotone=False, initialization="open")
+
+    assert monokan.paper_initialization_mode == kan_open.paper_initialization_mode == "empirical_newsvendor_open_readout"
+    assert kan.paper_initialization_mode == "global_empirical_newsvendor_median"
+    assert float(kan.layers[-1].scale_base.detach().abs().sum()) == 0.0
+    assert float(kan_open.layers[-1].scale_base.detach().abs().sum()) > 0.0
+    assert not kan_open.monotonic_vars
+    with pytest.raises(ValueError, match="initialization"):
+        build(monotone=False, initialization="warm")
+
+
+def test_kan_open_runs_are_kept_apart_from_kan_runs(tmp_path: Path) -> None:
+    rows = [
+        _row("monokan", 2025, [10.0, 20.0, 30.0], 0.0),
+        _row("kan", 2025, [13.0, 22.0, 34.0], 40.0),
+        _row("kan_open", 2025, [11.0, 21.0, 31.0], 10.0),
+    ]
+    for row in rows:
+        (tmp_path / f"{row['model']}_{row['seed']}.json").write_text(json.dumps(row), encoding="utf-8")
+        (tmp_path / f"{row['model']}_{row['seed']}.pt").write_bytes(b"")
+
+    summary = summarize_runs(tmp_path)
+
+    assert summary["kan"]["violation_pct_by_seed"] == [40.0]
+    assert summary["kan_open"]["violation_pct_by_seed"] == [10.0]
+    assert summary["monokan_minus_kan"]["mean"] == pytest.approx(-3.0)
+    assert summary["monokan_minus_kan_open"]["mean"] == pytest.approx(-1.0)
+    assert saved_seeds(tmp_path) == [2025]
+

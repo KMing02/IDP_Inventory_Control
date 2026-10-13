@@ -22,6 +22,7 @@ import torch
 
 from inventory_control.direct_quantity_experiment import (
     MODELS,
+    REPORTED_MODELS,
     implied_order_up_to,
     largest_violation_curves,
     summarize_runs,
@@ -33,7 +34,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
     train = commands.add_parser("train", help="train and evaluate (model, seed) runs")
-    train.add_argument("--models", default=",".join(MODELS))
+    train.add_argument("--models", default=",".join(REPORTED_MODELS),
+                       help=f"comma-separated subset of {','.join(MODELS)}; kan_open is the KAN initialised like MonoKAN")
     train.add_argument("--seeds", default="2025,2026,2027")
     train.add_argument("--epochs", type=int, default=2400)
     train.add_argument("--threads", type=int, default=2)

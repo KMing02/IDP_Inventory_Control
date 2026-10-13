@@ -1141,10 +1141,16 @@ def make_paper_raw_action_monokan_model_for_products(
     if history_feature_mode != "raw_lags":
         raise ValueError("the raw-action policy requires the raw_lags history feature mode")
     initial_order = empirical_newsvendor_target_ratio(products, feature_stats=feature_stats)
-    # Dropping the constraints leaves the same architecture. The two variants are
-    # initialised differently below (open readout vs constant output), so a
-    # comparison of the two measures the constraint together with that choice.
+    # Dropping the constraints leaves the same architecture. By default ("auto",
+    # as in the reported runs) the two variants are initialised differently below:
+    # an open readout for the certified model, a constant output otherwise.
+    # "open" or "constant" forces one start for either variant, so the constraint
+    # can be compared from an identical initialisation.
     monotone = bool(source.get("monotone", True))
+    initialization = str(source.get("initialization", "auto"))
+    if initialization not in {"auto", "open", "constant"}:
+        raise ValueError("initialization must be 'auto', 'open' or 'constant'")
+    open_readout = monotone if initialization == "auto" else initialization == "open"
     model = MonoKANPolicy(
         input_dim=1 + history_length + 4,
         hidden_layers=int(source.get("hidden_layers", 1)),
@@ -1186,7 +1192,7 @@ def make_paper_raw_action_monokan_model_for_products(
             grid_eps=float(source.get("adaptive_grid_eps", config.get("monokan", {}).get("adaptive_grid_eps", 0.1))),
         )
     model.apply_monotonic_constraints()
-    if monotone:
+    if open_readout:
         model.initialize_open_output(initial_order, reference_contexts=contexts)
     else:
         model.initialize_constant_output(initial_order)
@@ -1196,7 +1202,7 @@ def make_paper_raw_action_monokan_model_for_products(
     model.paper_include_demand_level_feature = False
     model.paper_enforce_action_cap = False
     model.paper_initialization_mode = (
-        "empirical_newsvendor_open_readout" if monotone else "global_empirical_newsvendor_median"
+        "empirical_newsvendor_open_readout" if open_readout else "global_empirical_newsvendor_median"
     )
     model.paper_roll_history = bool(source.get("roll_history", True))
     return model
