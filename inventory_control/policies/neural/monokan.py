@@ -1141,8 +1141,9 @@ def make_paper_raw_action_monokan_model_for_products(
     if history_feature_mode != "raw_lags":
         raise ValueError("the raw-action policy requires the raw_lags history feature mode")
     initial_order = empirical_newsvendor_target_ratio(products, feature_stats=feature_stats)
-    # Dropping the constraints leaves an identical KAN, which isolates the cost
-    # of monotonicity from the cost of the architecture.
+    # Dropping the constraints leaves the same architecture. The two variants are
+    # initialised differently below (open readout vs constant output), so a
+    # comparison of the two measures the constraint together with that choice.
     monotone = bool(source.get("monotone", True))
     model = MonoKANPolicy(
         input_dim=1 + history_length + 4,

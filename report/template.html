@@ -16,7 +16,7 @@
   </div>
   <div class="kind">Interdisciplinary Project · Final Report</div>
   <div class="title">End-to-End Inventory Control via Monotonic Kolmogorov–Arnold Networks</div>
-  <div class="subtitle">Where a certified monotonicity guarantee pays, and what it costs</div>
+  <div class="subtitle">What a certified monotonicity guarantee does, and what it costs</div>
   <div class="rule"></div>
   <div class="people">
     <span>Authors</span>Qi Zhang, Keming Lin<br>
@@ -32,20 +32,24 @@
 data, but nothing prevents them from learning decisions a manager would reject, such as ordering more because more
 stock is already on hand. Such common-sense rules are monotonicity properties, and MonoKAN, a Kolmogorov–Arnold
 network whose spline edges are projected onto monotone shapes, guarantees them by construction. We study what this
-guarantee does and what it costs in the lost-sales setting of Maggiar et al. (2025), always against the identical
-network without the guarantee, trained and evaluated in exactly the same way.</p>
+guarantee does and what it costs in the lost-sales setting of Maggiar et al. (2025), always against an unconstrained
+network of the same architecture, trained and evaluated under the same protocol.</p>
 <p>In our main design the network decides the order quantity itself from 37 inputs and the guarantee covers all of
-them. Without it, the otherwise identical KAN orders more as stock rises on {{D['kan']['violation']|.1f}}% of products,
-in every training run; with it, never. The guarantee costs {{-DP['mean']|.2f}} profit per period against that KAN
-(95% CI {{-DP['ci'][1]|.2f}} to {{-DP['ci'][0]|.2f}}, about {{cost_share|.1f}}% of profit), and it cannot fix a second
-weakness shared by all direct-quantity networks: they react to stock only about half as strongly as the optimal
-policy. In an alternative design that orders up to a learned quantile of observed demand, the structure itself
-enforces the stock rule and the guarantee only covers the economic inputs. There it costs nothing in our final setup
-and adds {{TP['matched']['mean']|.2f}} profit per period in a smaller setup matched to the main design; the final
-alternative policy reaches {{R.FINAL_REGRET|.2f}}% regret against the omniscient optimum, competitive with but not
-better than classical rules given the same information. The cost of the guarantee therefore scales with the work it
-has to do. The alternative design's advantage rests on knowing that the optimal policy is order-up-to, a route
-Maggiar et al. themselves call fragile.</p>
+them. Without it, the same KAN orders more as stock rises on {{D['kan']['violation']|.1f}}% of products,
+in every training run; with it, never. Under our training procedures the certified model earned {{-DP['mean']|.2f}} less profit per
+period than that KAN (95% CI {{-DP['ci'][1]|.2f}} to {{-DP['ci'][0]|.2f}}, about {{cost_share|.1f}}% of profit); the two
+networks were also initialised differently, so not all of this gap can be attributed to the constraint. The guarantee
+does not address a second weakness shared by all direct-quantity networks: they lower their order by only
+{{-D['fcnn']['slope']|.2f}} to {{-D['kan']['slope']|.2f}} units per unit of stock, against {{-R.OMNISCIENT_SLOPE|.2f}}
+for the optimal policy. In an alternative design that orders up to a learned quantile of observed demand, the structure itself
+enforces the stock rule and the guarantee only covers the economic inputs. There we detected no significant difference in
+mean profit in our final setup ({{TP['expanding']['mean']|.2f}} per period, 95% CI {{TP['expanding']['ci'][0]|.2f}} to
+{{TP['expanding']['ci'][1]|.2f}}), and in a smaller setup matched to the main design the certified model earned
+{{TP['matched']['mean']|.2f}} more per period. The final alternative policy reaches {{R.FINAL_REGRET|.2f}}% regret against the omniscient benchmark, competitive with but not
+better than classical rules given the same information. These results are consistent with a guarantee whose cost
+grows with the work it has to do, although the two designs differ in more than the constraint. The alternative
+design's advantage rests on knowing that the optimal policy is order-up-to, a route Maggiar et al. themselves call
+fragile.</p>
 
 <div class="toc">
 <h2>Contents</h2>
@@ -60,7 +64,7 @@ shelf space; too few, and customers leave empty-handed. The classical approach e
 first and then derives the order from it. End-to-end learning skips the separate forecast: a neural network observes
 the state of the system, including the stock on hand, recent demand and the product's prices and costs, and outputs
 the order directly, trained to maximise simulated profit. Maggiar et al. (2025) show that such a policy, trained on
-synthetic products with known optimal benchmarks, comes within {{R.PAPER_TABLE3_GAP|.2f}}% of the omniscient optimum in
+synthetic products with known optimal benchmarks, comes within {{R.PAPER_TABLE3_GAP|.2f}}% of the omniscient benchmark in
 average profit.</p>
 <p>A network that learns the whole decision also learns behaviour nobody checked. Nothing in its training stops it
 from ordering more when more stock is already on hand, or less when the selling price rises. Each such decision may be
@@ -72,19 +76,20 @@ hoped for after training, a long-standing idea in machine learning (Sill, 1998; 
 (Liu et al., 2024) whose learned edge functions are constrained to be monotone, which certifies the direction of every
 designated input for all possible inputs.</p>
 <p>The research question of this project is therefore: <strong>what does a certified monotonicity guarantee cost in
-an end-to-end inventory policy, and where does it actually matter?</strong> We answer it by comparing MonoKAN with the
-identical network without the guarantee, under exactly the same training and evaluation, so that any difference is
-due to the guarantee alone.</p>
+an end-to-end inventory policy, and where does it actually matter?</strong> We answer it by comparing MonoKAN with an
+unconstrained KAN of the same architecture, trained and evaluated under the same protocol. In the main design the two
+networks were also initialised differently (Section 4.1), so differences there cannot be attributed to the guarantee
+alone.</p>
 <p>Following the examiner's feedback on our intermediate results, the main design of this report lets the network
 decide the order quantity itself. In this design the rule "more stock, never a larger order" has to come from the
 network, so the guarantee does real work. We also report an alternative design, which orders up to a learned target
 stock. There the structure of the policy already enforces the stock rule, and the guarantee only covers the economic
-inputs. Comparing both designs shows where a guarantee pays and where it is nearly free.</p>
+inputs. Comparing both designs shows how the effect of the guarantee differs between them.</p>
 <p>The contributions are:</p>
 <ul>
 <li>a direct-quantity MonoKAN policy that certifies the direction of all 37 inputs, and a matched comparison with the
 same KAN without the certificate and with the feed-forward network of Maggiar et al.;</li>
-<li>a measurement of how often the unconstrained policy breaks the stock rule and of what the guarantee costs;</li>
+<li>a measurement of how often the unconstrained policy breaks the stock rule, and of the profit gap between the certified and the unconstrained model;</li>
 <li>a soft-quantile target-stock policy with a monotone level network, the steps that took it from
 {{R.DEVELOPMENT[0][1]|.1f}}% to {{R.FINAL_REGRET|.2f}}% regret, and comparisons with classical rules that use the same
 information;</li>
@@ -116,15 +121,16 @@ past observations. Products are drawn as in the paper: <span class="math">p</spa
 <span class="math">c = p·U</span>, <span class="math">h</span> exponential with mean 5, <span class="math">k = 10·U</span>,
 <span class="math">μ</span> exponential with mean 100 and <span class="math">ν</span> uniform on (0, 1), with independent
 uniform draws <span class="math">U</span>.</p>
-<p>With no lead time and independent demand, the optimal policy is myopic: order up to the critical-fractile quantile
+<p>With no lead time and independent demand, the optimal policy is a myopic base-stock policy (Zipkin, 2000): order up to the critical-fractile quantile
 of the demand distribution,</p>
 <div class="equation"><div class="body">
 <i>S</i>* = <i>F</i><sup>−1</sup>(<i>β</i>),&nbsp;&nbsp;
 <i>β</i> = <span class="frac"><span><i>p</i> − <i>c</i> + <i>k</i></span><span><i>p</i> − <i>c</i> + <i>k</i> + <i>h</i></span></span>,&nbsp;&nbsp;
 <i>q<sub>t</sub></i> = (<i>S</i>* − <i>I<sub>t</sub></i>)<sup>+</sup>.
 </div><div class="number">(2)</div></div>
-<p>This is the newsvendor solution. With the true Gamma parameters it defines the <em>omniscient</em> benchmark, which
-no real policy can reach because the parameters are hidden. Classical non-omniscient rules estimate
+<p>This is the newsvendor solution. With the true Gamma parameters it defines the <em>omniscient</em> benchmark: a
+distribution-informed base-stock policy that knows the demand distribution but not the future demand. It is our
+reference point, not a strict upper bound; on a particular demand path another policy can do as well or better. Classical non-omniscient rules estimate
 <span class="math">F<sup>−1</sup>(β)</span> from observed demand, either as an empirical quantile or by fitting a Gamma
 distribution (Section 4.3).</p>
 
@@ -156,9 +162,11 @@ profit, where a relative shortfall is meaningless. The two measures can disagree
 trailed a classical rule by only 3.6% in average profit, yet its regret was 21.4%: a typical product lost a fifth of
 the profit it could have made.</p>
 <p>Because all policies face identical products and demand, we compare them <em>paired by product</em>, which
-removes the large product-to-product spread. For a difference in profit we report the mean with its 95% confidence
-interval and the paired t-test, which speak about the average, and the Wilcoxon signed-rank test together with the
-share of products on which one policy is ahead, which speak about the typical product.</p>
+removes the large product-to-product spread. For a difference in profit we first average each product's profit over the three
+training seeds and then compare product by product. We report the mean difference with its 95% confidence interval and
+the paired t-test, the Wilcoxon signed-rank test, which is less sensitive to a few very large products, and the share
+of products on which one policy is ahead. These tests treat the trained models as given: they describe variation
+across products, not the variation from retraining with new seeds, which three seeds can only indicate.</p>
 
 <!-- ================================================================ 3 monokan -->
 <h1 id="monokan">3 Certified Monotonicity with MonoKAN</h1>
@@ -189,7 +197,8 @@ the right sign and scaled until the Fritsch–Carlson condition holds);</li>
 </ul>
 <p>A sum of functions that move in one direction moves in that direction, and an increasing function of it keeps it.
 The network's output is therefore monotone in every designated input, with the designated sign, for every possible
-input, not only on the training data. This is a property of the architecture, not a statistical finding.</p>
+input, not only on the training data, up to floating-point rounding. This is a property of the architecture, not a
+statistical finding.</p>
 
 <h2 id="lessons">3.3 Two implementation lessons</h2>
 <p>Two defects in our first implementation are worth recording, because both changed results. First, the projection
@@ -262,8 +271,11 @@ each.</caption>
 </table>
 </div>
 <p>MonoKAN uses one hidden layer of 8 nodes and Hermite splines with 5 intervals placed at data quantiles,
-{{D['monokan']['params']|,}} parameters in total. The comparison KAN is exactly the same network with the projection
-switched off. The third arm is the feed-forward network (FCNN) of Maggiar et al. with {{D['fcnn']['params']|,}}
+{{D['monokan']['params']|,}} parameters in total. The comparison KAN has the same architecture and training but no projection.
+Its initialisation differs in one respect: MonoKAN's output layer starts open, with its bias shifted so that the median
+initial order on reference contexts equals the empirical newsvendor level, whereas the KAN's output-layer weights start
+at zero, so it begins with a constant order at that level. We did not repeat the comparison with identical
+initialisation, so part of the profit gap in Section 5.2 may come from this difference. The third arm is the feed-forward network (FCNN) of Maggiar et al. with {{D['fcnn']['params']|,}}
 parameters. All three are trained on the same 1,000 products for 2,400 epochs to maximise total profit.</p>
 <p>To check the stock rule we sweep the stock on hand of every validation product from 0 to 4 days of mean demand in 25
 steps, holding all other inputs at the product's observed values, and flag every step at which the order rises (by
@@ -284,13 +296,20 @@ observed so far. With <span class="math">z<sub>(1)</sub> ≤ … ≤ z<sub>(n)</
 <p>where the sigmoid weights select the order statistics around position <span class="math">u</span>, the width
 <span class="math">τ</span> is learned, and <span class="math">g(u) = exp(a·u + b)</span> with
 <span class="math">a ≥ 0</span> is a learned gain that increases with the level. Every term moves the right way.
-The sigmoid weights are non-negative, so <span class="math">S<sub>t</sub></span> is nondecreasing in every observed
+The weights <span class="math">w<sub>j</sub> = σ((u − t<sub>j</sub>)/τ)</span> lie in (0, 1) and decrease in
+<span class="math">j</span>, because the positions <span class="math">t<sub>j</sub></span> increase. Rearranged, the
+bracket in (5) is <span class="math">(1 − w<sub>2</sub>) z<sub>(1)</sub> + ∑<sub>j=2</sub><sup>n−1</sup>
+(w<sub>j</sub> − w<sub>j+1</sub>) z<sub>(j)</sub> + w<sub>n</sub> z<sub>(n)</sub></span>, a combination of the order
+statistics with non-negative coefficients; each order statistic is nondecreasing in every observed demand, and the
+positive gain preserves this, so <span class="math">S<sub>t</sub></span> is nondecreasing in every observed
 demand. <span class="math">S<sub>t</sub></span> increases with <span class="math">u</span>, which MonoKAN makes increase
 in price and penalty and decrease in purchase and holding cost. And the subtraction makes the order nonincreasing in
 stock for <em>any</em> level network. The certificate therefore only has to cover four inputs, which is exactly why
 this design is a useful contrast. The level network has two layers of 8 nodes and 7-interval splines,
-{{R.LEVEL_PARAMS|,}} parameters. The final policy is trained on 5,000 products with each product's profit weighted
-equally in the loss.</p>
+{{R.LEVEL_PARAMS|,}} parameters. The final policy is trained on 5,000 products with a scaled objective: each product's
+simulated profit is divided by <span class="math">p<sub>i</sub> · μ̂<sub>i</sub> · T</span>, its price times its
+observed mean demand times the horizon (each floored at 1), before averaging over products, so that a few large
+products do not dominate the gradient.</p>
 <p>The same decoder can use three kinds of demand information, which matters for fair comparisons: one fixed estimate
 from the first 32 days, the last 32 days updated every period, or all demand seen so far (the final policy). Maggiar
 et al. (Section 5.3.1) suggest such order-up-to structures, but warn that they are fragile: they only work when the
@@ -308,16 +327,17 @@ main design;</li>
 <li><strong>all demand seen so far</strong>: the information of the final alternative policy.</li>
 </ul>
 <p>Within each comparison, every arm shares the products, demand paths, seeds, horizon, simulator, reward and
-training budget; for MonoKAN against KAN it also shares the architecture and parameter count. Only the factor under
-study changes.</p>
+training budget; for MonoKAN against KAN it also shares the architecture and parameter count. Apart from the
+initialisation difference in the main design (Section 4.1), only the factor under study changes.</p>
 
 <!-- ================================================================ 5 results: main design -->
 <h1 id="results-main">5 Results: Main Design</h1>
 <div class="keyfacts">
 <p><strong>In short.</strong> Without the certificate the same KAN breaks the stock rule on about a third of the
-products, in every training run. The certificate removes this completely, at a cost of about {{-DP['mean']|.0f}} profit
-per period. It cannot make the networks react strongly enough to stock, and no direct-quantity network matches a
-classical rule with the same information.</p>
+products, in every training run. The certificate removes this completely; under our training procedures the certified model
+earned about {{-DP['mean']|.0f}} less per period, a gap that also reflects a different initialisation. It does not make
+the networks react strongly enough to stock, and no direct-quantity network matches a classical rule with the same
+information.</p>
 </div>
 <div class="table-wrap">
 <table>
@@ -339,10 +359,8 @@ stock at some point of the sweep; "reaction" is the order reduction per unit of 
 <p>The KAN without the certificate orders more as stock rises on {{D['kan']['violation']|.1f}}% of products on average
 (Figure 2a). This happens in every training run, but how often varies widely: {{KS[0]|.1f}}%, {{KS[1]|.1f}}% and
 {{KS[2]|.1f}}% of products for the three seeds. The breaks occur at {{R.KAN_VIOLATING_STEPS|.1f}}% of all swept stock
-steps; most are small, but the largest is an extra order of about {{R.KAN_WORST_RISE|.0f}}% of a day's demand. Figure 2b
-shows a typical case. Over part of the stock range, the KAN's order goes <em>up</em> as stock goes up. The certified
-MonoKAN on the same product decreases everywhere, as it must. Across all seeds and products MonoKAN breaks the rule
-nowhere, because it cannot.</p>
+steps; most are small, but the largest is an extra order of about {{R.KAN_WORST_RISE|.0f}}% of a day's demand. Figure 2b shows the largest reversal we found, searching all seeds and products; the break rates above show how common reversals are. Over part of the stock range, the KAN's order goes <em>up</em> as stock goes up. The certified
+MonoKAN on the same product decreases everywhere, as it must. MonoKAN breaks the rule for no seed and no product, as its construction guarantees.</p>
 <figure>
 <img src="figures/fig_violations.svg" alt="Stock-rule breaks per training run and an example product">
 <figcaption><span class="caption-label">Figure 2.</span> (a) Share of validation products on which the order rises
@@ -350,19 +368,20 @@ with stock, for each training run of the KAN without the certificate, and for Mo
 stock on hand for one product (seed 2027) where the KAN breaks the rule most; both axes in days of mean demand. The
 optimal policy orders up to its target one-for-one.</figcaption>
 </figure>
-<p>The risk depends on the model family. The paper's FCNN never broke the rule in any run, while the KAN did in every
+<p>The risk depends on the model family. The paper's FCNN did not break the rule in any of our three runs, while the KAN did in every
 run. A practitioner cannot know in advance which kind of model and which training run they will get. The certificate
 removes that uncertainty: no input combination, seen or unseen, can produce a larger order from more stock.
 Maggiar et al. (Section 5.3.3) instead add a soft penalty for violations to the training loss, which makes breaks less
 likely but cannot exclude them.</p>
 
-<h2 id="price">5.2 What the certificate costs</h2>
-<p>The certificate is not free here. Paired over the 300 products, MonoKAN earns {{-DP['mean']|.2f}} per period less
-than the identical KAN without it: the difference is {{DP['mean']|.2f}} (95% CI {{DP['ci'][0]|.2f}} to
+<h2 id="price">5.2 The profit gap to the unconstrained KAN</h2>
+<p>The certified model earns less here. Paired over the 300 products, MonoKAN earns {{-DP['mean']|.2f}} per period less
+than the unconstrained KAN: the difference is {{DP['mean']|.2f}} (95% CI {{DP['ci'][0]|.2f}} to
 {{DP['ci'][1]|.2f}}; paired t-test and Wilcoxon test both p {{DP['p_t']}}). MonoKAN is ahead on only {{DP['ahead']}}% of products. The cost is about {{cost_share|.1f}}% of
-profit, and the regret rises from {{D['kan']['regret']|.2f}}% to {{D['monokan']['regret']|.2f}}%. In this design the
-certificate enforces 37 directions at once, including the stock rule that the unconstrained network breaks so often,
-and that restriction is what the profit pays for.</p>
+profit, and the regret rises from {{D['kan']['regret']|.2f}}% to {{D['monokan']['regret']|.2f}}%. Under the tested training
+procedures the certified model therefore achieved lower mean profit. The gap mixes the effect of the constraint, which
+here enforces 37 directions including the stock rule, with the effect of the different initialisation and of
+optimising over a restricted function class; our runs cannot separate these.</p>
 <p>The FCNN's three-seed average of {{D['fcnn']['reward']|,.2f}} is misleading. One run (seed {{R.FCNN_COLLAPSED['seed']}})
 collapsed to {{R.FCNN_COLLAPSED['reward']|,.2f}} ({{R.FCNN_COLLAPSED['regret']|.2f}}% regret), while the other two average
 {{R.FCNN_HEALTHY_REWARD|,.2f}}, slightly above MonoKAN. The FCNN is less reliable to train rather than simply worse.</p>
@@ -374,8 +393,8 @@ collapsed to {{R.FCNN_COLLAPSED['reward']|,.2f}} ({{R.FCNN_COLLAPSED['regret']|.
 for every unit of stock until it stops ordering, which gives {{-R.OMNISCIENT_SLOPE|.2f}} on our sweep. All three
 networks react far more weakly, between {{-D['fcnn']['slope']|.2f}} and {{-D['kan']['slope']|.2f}} (Figure 3), so
 they keep ordering although enough stock is on hand. This likely explains much of their high regret, and the
-certificate cannot address it. Maggiar et al. (Section 5.3.2) name exactly this as one reason to set monotonic networks aside: they
-fix the sign of a reaction but not its size. Our results confirm the concern.</p>
+certificate cannot address it. Maggiar et al. (Section 5.3.2) name this as one reason to set monotonic networks aside: they
+fix the sign of a reaction but not its size. Our results are consistent with this concern.</p>
 </div>
 <figure style="flex:0 0 46%; margin-top:0;">
 <img src="figures/fig_reaction.svg" alt="Order reduction per unit of stock">
@@ -383,7 +402,7 @@ fix the sign of a reaction but not its size. Our results confirm the concern.</p
 mean demand, averaged over products and seeds.</figcaption>
 </figure>
 </div>
-<p>As a consequence, no direct-quantity network comes close to a classical rule that sees the same information. The
+<p>No direct-quantity network comes close to a classical rule that sees the same information. The
 empirical quantile and the Gamma fit on the last 32 days reach {{C['percentile']['rolling'][1]|.2f}}% and
 {{C['gamma']['rolling'][1]|.2f}}% regret, against {{D['kan']['regret']|.2f}}% to {{D['fcnn']['regret']|.2f}}% for the
 networks. The paper's interpretability test points the same way. A direct-quantity policy's order at zero stock is its
@@ -404,16 +423,18 @@ is competitive, but not better.</p>
 <h2 id="development">6.1 From {{R.DEVELOPMENT[0][1]|.1f}}% to {{R.FINAL_REGRET|.2f}}% regret</h2>
 <p>The first MonoKAN in this design, a deep network that output the target stock directly, reached
 {{R.DEVELOPMENT[0][1]|.2f}}% regret, worse than an unconstrained FCNN in the same structure
-({{R.FIRST_FCNN_REGRET|.2f}}%) and twelve times worse than a classical rule. The same network <em>without</em> the
-certificate was just as poor, so the constraint was not the cause. Figure 4 shows the steps that fixed it, each
-applied cumulatively, with every step keeping the certificate. The two largest gains came from placing the spline knots
+({{R.FIRST_FCNN_REGRET|.2f}}%) and about twelve times the regret of a classical rule. An unconstrained KAN of the same architecture was
+similarly poor (20.68%), so the constraint was not the main cause. Figure 4 shows the steps that fixed it, each
+applied cumulatively. All variants were designed to enforce monotonicity; the projection defect of Section 3.3 was
+corrected at the fourth step. The two largest gains came from placing the spline knots
 where the data lies (Section 3.3) and from the soft-quantile structure of equation (5). Using all demand seen so far,
 weighting every product equally in the loss and training on more products brought the regret to
 {{R.FINAL_REGRET|.2f}}%. On 3,000 validation products the final policy reaches {{R.FINAL_REGRET_3000|.2f}}%.</p>
 <figure>
 <img src="figures/fig_development.svg" alt="Regret after each development step">
 <figcaption><span class="caption-label">Figure 4.</span> Regret of the alternative design after each cumulative
-change, three seeds each. All steps keep the monotonicity certificate.</figcaption>
+change, three seeds each. All variants were designed to enforce
+monotonicity; the projection defect of Section 3.3 was corrected at the fourth step.</figcaption>
 </figure>
 <p>Several plausible changes did not help (Appendix C). Making the KAN larger made it worse. A warm start that imitated
 the classical rule before profit training was severely harmful, because the static rule it imitated differs from the
@@ -453,12 +474,13 @@ information.</figcaption>
 <h2 id="same-kan">6.3 The same KAN with and without the certificate</h2>
 <p>The last two rows of Table 3 are the core test of this design: the same policy, the same {{R.LEVEL_PARAMS|,}}
 parameters, the same training and data, once with and once without the certificate. MonoKAN has the lower regret in all
-three windows. Table 4 adds paired tests on profit. In the final setup with all demand, average profit is a tie
-({{TP['expanding']['mean']|+.2f}} per period, p = {{TP['expanding']['p_t']}}), yet MonoKAN is ahead on
-{{TP['expanding']['ahead']}}% of products (Wilcoxon p = {{TP['expanding']['p_w']}}). With the last 32 days the gain is
+three windows. Table 4 adds paired tests on profit. In the final setup with all demand, the mean profit difference is
+{{TP['expanding']['mean']|+.2f}} per period (95% CI {{TP['expanding']['ci'][0]|+.2f}} to
+{{TP['expanding']['ci'][1]|+.2f}}, p = {{TP['expanding']['p_t']}}): we detected no significant difference, which is not
+the same as showing that the profits are equal. MonoKAN is ahead on {{TP['expanding']['ahead']}}% of products
+(Wilcoxon p = {{TP['expanding']['p_w']}}). With the last 32 days the gain is
 small but consistent; with the fixed estimate it is borderline, since only the t-test finds it. In a smaller setup
-matched to the main design (1,000 products, profit objective, last 32 days) the certificate clearly helps:
-{{TP['matched']['mean']|+.2f}} per period, MonoKAN ahead on {{TP['matched']['ahead']}}% of products, and regret
+matched to the main design (1,000 products, profit objective, last 32 days) the certified model earned more: {{TP['matched']['mean']|+.2f}} per period (95% CI {{TP['matched']['ci'][0]|+.2f}} to {{TP['matched']['ci'][1]|+.2f}}), MonoKAN ahead on {{TP['matched']['ahead']}}% of products, and regret
 {{MA['monokan'][1]|.2f}}% against {{MA['kan'][1]|.2f}}%.</p>
 <div class="table-wrap">
 <table>
@@ -470,7 +492,7 @@ alternative design, profit per period, paired over the 300 products with rewards
 </tbody>
 </table>
 </div>
-<p>Why is the certificate free here, or even helpful? The subtraction already guarantees the stock rule, so the
+<p>Why does the certificate show no profit cost here, and sometimes help? The subtraction already guarantees the stock rule, so the
 certificate only asks the level network to follow the four economic directions, which a good policy follows anyway.
 Our reading is that with ample data the unconstrained KAN finds these directions by itself, while with less data the
 constraint acts as useful prior knowledge. We have not tested this explanation directly. Two earlier controls point the
@@ -480,10 +502,12 @@ same way. A parameter-matched MLP level network ties with MonoKAN ({{R.MLP_CONTR
 
 <h2 id="interpretability">6.4 Interpretability, speed and data needs</h2>
 <p>With only four inputs the level network is easy to read (Figure 6a). The learned target stock rises with price and
-penalty and falls with purchase and holding cost, as certified. More strikingly, the learned percentile
-<span class="math">u</span> matches the newsvendor fractile <span class="math">β</span> of equation (2) with
-correlation {{R.NEWSVENDOR_CORR|.3f}} (Figure 6b). The fractile was never given to the model as an input, an initial
-value or a training target. The network recovered the textbook solution from profit alone.</p>
+penalty and falls with purchase and holding cost, as certified. The learned percentile <span class="math">u</span> also
+tracks the newsvendor fractile <span class="math">β</span> of equation (2) closely, with correlation
+{{R.NEWSVENDOR_CORR|.3f}} (Figure 6b), although the fractile was never given to the model as an input, an initial value
+or a training target. This shows agreement in the level, not that the policy equals the textbook one: the
+quantile-based, order-up-to structure was supplied by design, and the decoder has its own learned smoothing and
+gain.</p>
 <figure>
 <img src="figures/fig_interpretability.svg" alt="Partial dependence and newsvendor match">
 <figcaption><span class="caption-label">Figure 6.</span> (a) Mean target stock as each economic input sweeps from its
@@ -496,8 +520,8 @@ value or a training target. The network recovered the textbook solution from pro
 decision than a feed-forward network of the same size ({{R.TS_MS['monokan']|.2f}} ms against {{R.TS_MS['mlp']|.2f}} ms on
 a CPU), because spline evaluation is more expensive than a matrix product. For daily ordering decisions this does not
 matter. MonoKAN also does not need less data. With 100 training products it is worse than a parameter-matched MLP
-(Figure 7). What the certificate buys is reliable improvement as data grows: MonoKAN improves steadily, while the MLP
-degrades beyond 300 products.</p>
+(Figure 7). Across the three tested training-set sizes (three seeds each), MonoKAN's regret fell steadily, while the
+MLP's rose again at 1,000 products; other sizes, budgets or initialisations may behave differently.</p>
 </div>
 <figure style="flex:0 0 46%; margin-top:0;">
 <img src="figures/fig_sample_efficiency.svg" alt="Regret against training products">
@@ -518,55 +542,81 @@ information.</caption>
 <tbody>
 <tr><td>Who enforces "more stock, never a larger order"</td><td>the certificate</td><td>the subtraction (<i>S</i> − <i>I</i>)<sup>+</sup></td></tr>
 <tr><td>Without the certificate: products breaking the stock rule</td><td>{{D['kan']['violation']|.1f}}%</td><td>0% (impossible)</td></tr>
-<tr><td>Certificate against the same KAN, profit per period</td><td>{{DP['mean']|+.2f}} (p {{DP['p_t']}})</td><td>{{TP['matched']['mean']|+.2f}} (p {{TP['matched']['p_t']}})</td></tr>
+<tr><td>Certified minus unconstrained KAN, profit per period</td><td>{{DP['mean']|+.2f}} (p {{DP['p_t']}})</td><td>{{TP['matched']['mean']|+.2f}} (p {{TP['matched']['p_t']}})</td></tr>
 <tr><td>Regret of MonoKAN</td><td>{{D['monokan']['regret']|.2f}}%</td><td>{{MA['monokan'][1]|.2f}}%</td></tr>
 </tbody>
 </table>
 </div>
-<p>The pattern is consistent. The certificate costs profit exactly where it does real work. In the main design it
-alone enforces the stock rule, and the unconstrained network breaks that rule on a third of the products. Where the
-structure already does the work, the certificate is free, and in the smaller setup it even helps. With the same
-data, the alternative's regret is a fraction of the main design's. The gap therefore comes from the structure, not from
-the information. Building inventory knowledge into the policy helped more than anything else we tried; with all demand
+<p>The observed effect of the certificate differs between the two designs. In the main design, where it alone
+enforces the stock rule and the unconstrained network breaks that rule on a third of the products, the certified model
+earned less. In the alternative, where the subtraction enforces the rule, the certified model earned more in this
+setup, and in the final setup we detected no difference. This is consistent with a guarantee that costs more the more
+work it has to do, but the comparison does not isolate the stock constraint: the designs also differ in inputs,
+architecture and decoder, and the main design's arms were initialised differently. Removing only the stock constraint
+from the main design would test the idea directly. With the same
+data and training budget, the alternative's regret is a fraction of the main design's, so the difference does not come
+from information but from the policy structure and what comes with it. Building inventory knowledge into the policy helped more than anything else we tried; with all demand
 seen so far, the matched alternative reaches {{R.MATCHED_EXPANDING_REGRET|.2f}}%.</p>
-<p>Why then is the alternative not the main design? Its advantage rests entirely on knowing the shape of the answer
-in advance. In our setting the optimal policy is order-up-to (equation 2), so a structure that can only produce
-order-up-to policies loses nothing. Maggiar et al. (Section 5.3.1) call this route fragile, and their own experiments
+<p>Why then is the alternative not the main design? Its advantage rests on knowing the shape of the answer in advance. In our setting the optimal policy is order-up-to (equation 2), so a structure that can only produce order-up-to policies loses nothing in principle. Maggiar et al. (Section 5.3.1) call this route fragile, and their own experiments
 show why. With delivery lead times of 2 to 7 periods, where order-up-to is no longer optimal, order-up-to policies fall
 {{R.PAPER_LEAD_TIME_GAP[0]|.2f}}% to {{R.PAPER_LEAD_TIME_GAP[1]|.2f}}% behind a network that decides the quantity
-(their Table 4). The direct-quantity design assumes nothing about the shape of the optimal policy. It is the general
-method, and the one in which a certified guarantee is genuinely needed.</p>
+(their Table 4). The direct-quantity design does not impose an order-up-to decoder, although it still makes assumptions:
+the certified directions, sorted demand inputs, output scaling and limited capacity. It is the more general formulation
+and the one in which the guarantee has to do the work; we have not verified that it performs better on other inventory
+problems.</p>
 
 <!-- ================================================================ 8 discussion -->
 <h1 id="discussion">8 Discussion</h1>
-<h2 id="practical">8.1 The practical questions</h2>
+<h2 id="why-monotone">8.1 Why impose monotonicity if profit is the objective?</h2>
+<p>Adding a constraint can never improve the optimal profit; at best it leaves it unchanged. In our setting the optimal
+policy of equation (2) already orders less when stock rises, so at the optimum the stock rule costs nothing. If the
+optimum could be found exactly and the evaluation products matched the situations met in practice, monotonicity would
+add nothing to profit. Its role lies elsewhere.</p>
+<ul>
+<li><strong>Learned policies are approximations.</strong> The optimal policy never orders more when stock rises, yet the
+unconstrained KAN did so on {{D['kan']['violation']|.0f}}% of products. Training on finite data does not by itself
+recover the known structure of the optimum.</li>
+<li><strong>Average profit does not measure every decision.</strong> Profit on the evaluation products says little about
+states that are rare or absent in training. The certificate holds for every input, which is what lets a planner rely
+on the direction of each recommendation without checking it case by case.</li>
+<li><strong>Prior knowledge can help or hurt.</strong> As a restriction it helped in the smaller matched setup of
+Section 6.3, and it went with lower profit where it had to enforce many directions at once (Section 5.2).</li>
+</ul>
+<p>We therefore treat monotonicity as a requirement set by the decision maker, comparable to a service-level
+constraint, and ask what meeting it costs. If profit on the evaluation products were the only criterion, the
+unconstrained KAN, or the classical rule, would be preferred in the main design.</p>
+<h2 id="practical">8.2 The practical questions</h2>
 <p>Table 6 summarises our answers to the practical questions about MonoKAN for both designs.</p>
 <div class="table-wrap">
 <table>
 <caption><span class="caption-label">Table 6.</span> Summary of the practical questions.</caption>
 <thead><tr><th style="width:22%">Question</th><th class="center" style="width:9%">Main</th><th style="width:30%">Evidence</th><th class="center" style="width:9%">Alternative</th><th style="width:30%">Evidence</th></tr></thead>
 <tbody>
-<tr><td>Is the guarantee free?</td><td class="center"><span class="verdict no">No</span></td><td>{{-DP['mean']|.0f}} profit per period against the same KAN</td><td class="center"><span class="verdict yes">Yes</span></td><td>a tie in the final setup, {{TP['matched']['mean']|+.1f}} per period with 1,000 products</td></tr>
+<tr><td>Does the guarantee cost profit?</td><td class="center"><span class="verdict no">Yes</span></td><td>{{-DP['mean']|.0f}} less per period than the KAN (initialisation also differed)</td><td class="center"><span class="verdict yes">None detected</span></td><td>{{TP['expanding']['mean']|+.2f}} (CI {{TP['expanding']['ci'][0]|+.2f}} to {{TP['expanding']['ci'][1]|+.2f}}) in the final setup; {{TP['matched']['mean']|+.1f}} with 1,000 products</td></tr>
 <tr><td>Does it always follow the rules?</td><td class="center"><span class="verdict yes">Yes</span></td><td>0 violations; {{D['kan']['violation']|.0f}}% of products without the certificate</td><td class="center"><span class="verdict yes">Yes</span></td><td>0 violations in every check</td></tr>
 <tr><td>Good cost performance?</td><td class="center"><span class="verdict no">No</span></td><td>{{D['monokan']['regret']|.2f}}% regret; classical rules with the same data {{C['gamma']['rolling'][1]|.2f}}–{{C['percentile']['rolling'][1]|.2f}}%</td><td class="center"><span class="verdict partly">Partly</span></td><td>{{R.FINAL_REGRET|.2f}}% regret; classical rules with the same data {{C['gamma']['expanding'][1]|.2f}}–{{C['percentile']['expanding'][1]|.2f}}%</td></tr>
-<tr><td>Easy to interpret?</td><td class="center"><span class="verdict partly">Partly</span></td><td>every direction guaranteed; implied levels match the optimum weakly ({{R.DIRECT_IMPLIED_CORR|.2f}})</td><td class="center"><span class="verdict yes">Yes</span></td><td>learned percentile matches the newsvendor fractile ({{R.NEWSVENDOR_CORR|.2f}})</td></tr>
+<tr><td>Easy to interpret?</td><td class="center"><span class="verdict partly">Partly</span></td><td>every direction guaranteed; implied levels match the optimum weakly ({{R.DIRECT_IMPLIED_CORR|.2f}})</td><td class="center"><span class="verdict yes">Yes</span></td><td>learned percentile tracks the newsvendor fractile (correlation {{R.NEWSVENDOR_CORR|.2f}})</td></tr>
 <tr><td>Small and fast?</td><td class="center"><span class="verdict no">No</span></td><td>twice the FCNN's parameters; {{R.DIRECT_MS['monokan']|.2f}} vs {{R.DIRECT_MS['fcnn']|.2f}} ms per decision</td><td class="center"><span class="verdict partly">Partly</span></td><td>8× smaller than the first design, slower than an MLP of the same size</td></tr>
 <tr><td>Learns from little data?</td><td class="center"><span class="verdict untested">Not tested</span></td><td>trained at one data size</td><td class="center"><span class="verdict no">No</span></td><td>worse than an MLP with 100 products, better with 1,000</td></tr>
 </tbody>
 </table>
 </div>
 
-<h2 id="limitations">8.2 Limitations</h2>
+<h2 id="limitations">8.3 Limitations</h2>
 <ul>
 <li><strong>A simple setting.</strong> Demand is stationary, orders arrive immediately and products are synthetic. This is
 exactly the setting in which order-up-to is optimal, and it favours the alternative design. We have not tested
 changing demand, lead times or real data.</li>
 <li><strong>Scale.</strong> We train on 1,000 to 5,000 products, compared with 40,000 in the paper, and use three seeds per
-experiment. Our absolute profit levels are therefore not comparable with the paper's. The paired comparisons, which
-are what our conclusions rest on, are not affected.</li>
-<li><strong>Checkpoint selection.</strong> The best checkpoint is selected on the same 300 validation products that we
-report on, which may flatter all learned policies slightly. The final alternative policy keeps its standing on 3,000
-products ({{R.FINAL_REGRET_3000|.2f}}%), most of them unseen during selection (Appendix C).</li>
+experiment. Our absolute profit levels are therefore not comparable with the paper's.</li>
+<li><strong>Selection on the validation products.</strong> Checkpoints are selected, and the method was
+developed, on the same 300 validation products that we report on. Pairing on shared products and demand paths reduces
+product-level noise, but it does not remove this selection bias. The final alternative policy keeps its standing on
+3,000 products ({{R.FINAL_REGRET_3000|.2f}}%), but that set contains the original 300 and is not a fully independent
+test (Appendix C).</li>
+<li><strong>Initialisation in the main design.</strong> MonoKAN and the unconstrained KAN started from different
+output-layer initialisations (Section 4.1). A rerun with identical initialisation is needed to attribute the profit gap
+to the constraint.</li>
 <li><strong>The weak stock reaction is unexplained.</strong> All direct-quantity networks react to stock about half as
 strongly as they should. A plausible cause is that the stock levels visited during training cover only a narrow range;
 we have not verified this.</li>
@@ -580,17 +630,21 @@ did not break the rule, so how often an unconstrained model breaks it depends on
 <h1 id="conclusion">9 Conclusion</h1>
 <p>We asked what a certified monotonicity guarantee costs in an end-to-end inventory policy and where it matters. When
 the network decides the order itself, the guarantee does real work. Without it, the same network orders more as stock
-rises on a third of the products, in every training run. With MonoKAN this is impossible for any input, at a price of
-about {{cost_share|.1f}}% of profit. When the structure of the policy already enforces the stock rule, the guarantee is
-free, and in a smaller setup it even helps. The cost of the guarantee scales with the work it has to do. Building inventory
-knowledge into the structure produced the best policy of the project, at {{R.FINAL_REGRET|.2f}}% regret, but only
-because the shape of the optimal policy was known in advance. The guarantee fixes the direction of every response but
+rises on a third of the products, in every training run. With MonoKAN this cannot happen; under our training
+procedures the certified model earned about {{cost_share|.1f}}% less, a gap that also reflects a different
+initialisation. When the structure of the policy already enforces the stock rule, we detected no profit cost of the
+guarantee, and in a smaller setup the certified model did better. This is consistent with a guarantee whose cost grows
+with the work it has to do, but our comparison of the designs does not isolate that effect. Building inventory
+knowledge into the structure produced the best policy of the project, at {{R.FINAL_REGRET|.2f}}% regret; this relies
+on the shape of the optimal policy being known in advance. The guarantee fixes the direction of every response but
 not its strength, and in this simple setting a well-chosen classical rule with the same information remains better
 than both designs.</p>
 <p>Three directions follow. First, the main design should receive the improvements that helped the alternative: more
-training products and per-product weighting. Second, a second property can be certified: the order should fall by at
-most one unit per unit of stock. Together with monotonicity, this bounds the stock reaction between 0 and −1 and
-addresses the weakness the current guarantee cannot fix. Third, settings with changing demand and lead times, where
+training products and per-product weighting. Second, the main design should be rerun with identical initialisation of
+both networks, and with only the stock constraint removed, to attribute its profit gap. Further shape restrictions,
+such as an order that falls by at most one unit per unit of stock, can also be certified; they bound the reaction
+between −1 and 0, which the current networks already satisfy, so whether they, or training on a wider range of stock
+levels, make the reaction stronger remains to be tested. Third, settings with changing demand and lead times, where
 order-up-to policies are no longer optimal, are where a certified direct-quantity policy should be tested next.</p>
 
 <!-- ================================================================ references -->
@@ -617,7 +671,11 @@ functions. In <em>Advances in Neural Information Processing Systems 30</em>.</p>
 <p>All code is in the accompanying repository. Every command runs from the repository root on a CPU; each target-stock
 command trains one seed and is repeated for seeds 2025, 2026 and 2027. Saved runs are compared with
 <span class="mono">scripts/compare_target_stock_runs.py</span>. The repository's <span class="mono">docs/EXPERIMENTS.md</span>
-lists every number with its confidence interval, and <span class="mono">docs/ARCHITECTURE.md</span> maps the code.</p>
+lists every number with its confidence interval, and <span class="mono">docs/ARCHITECTURE.md</span> maps the code.
+The numbers of this report are collected, with their sources, in <span class="mono">report/results.py</span>. They were
+transcribed from the experiment outputs; the per-run result files of the direct-quantity and information-window runs
+were not kept, so the commands below regenerate them rather than read stored files. The final alternative policy's run
+is kept, and its regret is reproduced by <span class="mono">compare_target_stock_runs.py summary</span>.</p>
 <div class="table-wrap">
 <table>
 <thead><tr><th style="width:30%">Result</th><th>Command</th></tr></thead>

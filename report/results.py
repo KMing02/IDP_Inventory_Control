@@ -1,9 +1,22 @@
 """Every number the final report quotes, in one place, with its source.
 
-Sources: ``docs/EXPERIMENTS.md`` (direct-quantity table, alternative-design tables, sample efficiency, evaluation
-precision) and the outputs of the repository's scripts as recorded there (``run_classical_windows.py``,
-``compare_target_stock_runs.py``, ``run_direct_quantity_comparison.py summarize/interpret``). Rewards are profit per
-period averaged over the 300 validation products and three seeds; regret is in percent.
+The numbers were transcribed from the experiment outputs, not read from files at build time. Provenance per block:
+
+- DIRECT, DIRECT_PAIRED, KAN_*, FCNN_*, OMNISCIENT_SLOPE: ``run_direct_quantity_comparison.py train`` then ``summarize``
+  (code of commit 0f2b8fa, 2,400 epochs, seeds 2025-2027), recorded in docs/EXPERIMENTS.md at 226f001.
+  DIRECT_IMPLIED_CORR, CLASSICAL_IMPLIED_CORR, DIRECT_MS*: ``... interpret`` on the same checkpoints.
+  The per-run result files and checkpoints were not kept; the curves of Figure 2b were taken from the chart of the
+  final presentation (data/violation_curves.json).
+- CLASSICAL: ``run_classical_windows.py`` (reproduced exactly at f1e2f20).
+- TS_MONOKAN, TS_KAN, TS_PAIRED, MATCHED: ``run_soft_quantile_monokan.py`` with the --set overrides listed in
+  Appendix A, compared with ``compare_target_stock_runs.py``. Only the final MonoKAN run (expanding window) is kept
+  under outputs/soft_quantile_monokan; its 0.80% regret and 4285.53 profit are reproduced by ``summary``.
+- FINAL_*, DEVELOPMENT, MLP_CONTROL, EARLIER_KAN_CONTROL, SAMPLE_*, CONFIRMATION_3000, NEWSVENDOR_CORR, TS_MS,
+  PRODUCT_REWARD_*: docs/EXPERIMENTS.md (target-stock evidence, What Moved The Result, Sample Efficiency, Evaluation
+  Precision) and data/*.csv for Figure 6.
+- PAPER_*: Maggiar et al. (2025), Tables 3 and 4.
+
+Rewards are profit per period averaged over the 300 validation products and three seeds; regret is in percent.
 """
 
 # ---------------------------------------------------------------- main design: direct quantity (1,000 products)
@@ -54,13 +67,13 @@ TS_KAN = {"fixed": (4246.38, 2.37), "rolling": (4253.51, 1.96), "expanding": (42
 # MonoKAN minus KAN, paired over products
 TS_PAIRED = {
     "expanding": {"mean": -0.44, "ci": (-1.97, 1.08), "p_t": "0.569", "p_w": "0.0001", "ahead": 61,
-                  "reading": "tie on average, ahead on most products"},
+                  "reading": "no significant mean difference; ahead on most products"},
     "rolling": {"mean": 1.81, "ci": (0.16, 3.46), "p_t": "0.032", "p_w": "< 0.0001", "ahead": 62,
                 "reading": "small but consistent"},
     "fixed": {"mean": 2.64, "ci": (0.17, 5.10), "p_t": "0.036", "p_w": "0.464", "ahead": 51,
               "reading": "small and borderline"},
     "matched": {"mean": 5.90, "ci": (3.32, 8.48), "p_t": "< 0.0001", "p_w": "< 0.0001", "ahead": 72,
-                "reading": "clearly helps"},
+                "reading": "ahead on both tests"},
 }
 # matched to the main design: 1,000 products, profit objective, 2,400 epochs, last 32 days
 MATCHED = {"monokan": (4260.45, 2.26), "kan": (4254.55, 3.35)}

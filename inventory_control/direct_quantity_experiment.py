@@ -38,7 +38,8 @@ from inventory_control.products import PaperLostSalesProduct, PaperLostSalesProd
 from inventory_control.training.direct_backprop import train_paper_lost_sales_fcnn
 
 CONFIG = Path("configs/paper_lost_sales_rolling_direct_target_dev_1k_normalized.yaml")
-# MonoKAN and KAN share this architecture; only ``monotone`` differs between them.
+# MonoKAN and KAN share this architecture. ``monotone`` switches the projection and also the output
+# initialisation (open readout for MonoKAN, constant output for KAN; see the factory).
 KAN_METADATA = {
     "hidden_layers": 1,
     "hidden_units": 8,
@@ -218,8 +219,8 @@ def train_and_evaluate(name: str, seed: int, epochs: int, out_dir: str | Path,
 def summarize_runs(out_dir: str | Path) -> dict[str, Any]:
     """Pool the per-run result files of ``out_dir`` and write ``summary.json``.
 
-    ``monokan_minus_kan`` is the price of the certificate: the identical architecture with and without it, paired
-    over the shared products with rewards averaged over seeds.
+    ``monokan_minus_kan`` is the profit gap between the certified and the unconstrained model (same architecture,
+    different output initialisation), paired over the shared products with rewards averaged over seeds.
     """
     out_dir = Path(out_dir)
     rows = [

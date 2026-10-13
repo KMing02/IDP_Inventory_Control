@@ -16,7 +16,9 @@ import results as R  # noqa: E402
 
 HERE = Path(__file__).parent
 REPO = HERE.parent
-INTERPRETABILITY = REPO / "outputs/soft_quantile_monokan/interpretability"
+# Frozen copies of run_monokan_interpretability.py outputs for the final checkpoint (seed 2025), so the report
+# builds from a fresh clone; outputs/ itself is not tracked.
+INTERPRETABILITY = HERE / "data"
 
 BLUE, DARK, LIGHT, GREY, ORANGE, GREEN = "#0065BD", "#003359", "#98C6EA", "#7F7F7F", "#E37222", "#A2AD00"
 COLORS = {"monokan": BLUE, "kan": ORANGE, "fcnn": GREY, "perfect": "#333333", "mlp": GREY}

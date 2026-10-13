@@ -8,8 +8,8 @@ Keming Lin, examined by Prof. Dr. Stefan Minner. The final report is [`report/ID
 A neural network can learn an ordering policy end to end, but it can also learn decisions no manager would accept,
 such as ordering more because there is already more stock. MonoKAN, a Kolmogorov–Arnold network whose spline edges
 are projected onto monotone shapes, *guarantees* such common-sense directions by construction. The project asks what
-that guarantee does and what it costs, by comparing MonoKAN with the identical network without the guarantee under
-the same training and evaluation, in the lost-sales setting of Maggiar et al. (2025).
+that guarantee does and what it costs, by comparing MonoKAN with an unconstrained KAN of the same architecture under
+the same training and evaluation protocol, in the lost-sales setting of Maggiar et al. (2025).
 
 ## Two Designs
 
@@ -27,10 +27,11 @@ the same training and evaluation, in the lost-sales setting of Maggiar et al. (2
 Regret is the mean per-product shortfall against the omniscient policy that knows the true demand distribution
 (0% is perfect); every comparison is paired over the same 300 validation products and three seeds.
 
-**Main design: the guarantee does real work, and it has a price.** Without it, the same KAN orders more when stock
-rises on 35.1% of products (9 to 51% depending on the seed); MonoKAN never does. Against that same KAN, MonoKAN gives
-up 22.89 profit per period (95% CI 13.20 to 32.57, p < 0.0001), about 0.5% of profit. All direct-quantity networks
-react to stock only about half as strongly as the optimal policy, and none beats a classical rule with the same
+**Main design: the guarantee does real work, and the certified model earned less.** Without the certificate, the
+same KAN orders more when stock rises on 35.1% of products (9 to 51% depending on the seed); MonoKAN never does. Under
+our training procedures MonoKAN earned 22.89 less per period than that KAN (95% CI 13.20 to 32.57, p < 0.0001), about
+0.5% of profit. The two networks were also initialised differently (MonoKAN with an open readout calibrated to the empirical newsvendor level, the KAN with a constant output at that level), so the gap is not purely the cost of the constraint; a rerun with identical initialisation would isolate it. All direct-quantity networks lower their order by only 0.34 to 0.54 units per unit
+of stock, against 0.90 for the optimal policy, and none beats a classical rule with the same
 32-day information.
 
 | Direct quantity | Profit / period | Regret | Products ordering more as stock rises |
@@ -40,7 +41,7 @@ react to stock only about half as strongly as the optimal policy, and none beats
 | Paper FCNN | 3874.38 | 20.64% | 0% |
 | Classical rules, last 32 days | 4255.93 – 4275.37 | 1.25 – 1.90% | 0% |
 
-**Alternative design: the structure does the work, and the guarantee is free.** The final policy reaches 0.80%
+**Alternative design: the structure does the work, and no profit cost of the guarantee was detected.** The final policy reaches 0.80%
 regret (0.78% on 3,000 products) with 1,892 parameters. In every information window it beats the same KAN without the
 certificate on regret; against a good classical rule with the same information it is competitive, not better.
 
@@ -52,9 +53,11 @@ certificate on regret; against a good classical rule with the same information i
 
 \* also told that demand is Gamma distributed.
 
-**Matched comparison.** With 1,000 training products and both designs seeing only the last 32 days, the guarantee
-costs 22.89 per period in the main design and *gains* 5.90 in the alternative (p < 0.0001 both), and regret is 15.71%
-against 2.26%. The guarantee costs profit exactly where it has to enforce the stock rule by itself.
+**Matched comparison.** With 1,000 training products and both designs seeing only the last 32 days, the certified
+model earns 22.89 less per period in the main design and 5.90 *more* in the alternative (p < 0.0001 both), and regret is
+15.71% against 2.26%. This is consistent with a guarantee that costs more where it has to enforce the stock rule by
+itself, but the two designs differ in more than the constraint (and the main design's arms in initialisation), so the
+comparison does not isolate the stock constraint.
 
 `docs/EXPERIMENTS.md` has every number with its confidence interval, the controls, the negative results and the
 command that reproduces it.

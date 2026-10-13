@@ -40,11 +40,13 @@ widespread and not always small: 3.7% of swept steps, and the worst rise is
 `0.109` mean-demand units, about 11% of a day's demand. The violation rate is architecture dependent: the
 feed-forward arm violates on 0.0% of products. The FCNN arm is unstable: seed 2027 collapsed to `3155.76` (`42.43%` regret), as the same seed did at 400 epochs; the other seeds average `4233.69`, above the certified model, so its three-seed mean understates what a successful run achieves.
 
-It is also not free here. Paired over the 300 products (seed-averaged), MonoKAN minus the unconstrained KAN is
+The certified model also earned less here. Paired over the 300 products (seed-averaged), MonoKAN minus the
+unconstrained KAN is
 `-22.89` per period, 95% CI `[-32.57, -13.20]`, paired t `p < 0.0001`,
-Wilcoxon `p < 0.0001`; MonoKAN is ahead on 28% of products. Under the
-target-stock decoder at the same budget the certificate cost nothing (`-0.08`, `p = 0.94`), because the subtraction
-already enforced the inventory direction.
+Wilcoxon `p < 0.0001`; MonoKAN is ahead on 28% of products. The two networks were also initialised differently (MonoKAN with an open readout calibrated to the empirical newsvendor level, the KAN with a constant output at that level), so the gap is not purely the cost of the constraint; a rerun with identical initialisation would isolate it. The paired test treats the
+trained models as given (rewards averaged over seeds first), so its interval reflects variation across products, not
+retraining. Under the target-stock decoder at the same budget no profit difference to an MLP level network was
+detected (`-0.08`, `p = 0.94`); there the subtraction already enforces the inventory direction.
 
 No direct-quantity policy reacts to stock with more than 60% of the omniscient policy's
 `-0.90` on the same sweep, and none beats the classical rules that see the same information, the last 32 observations re-estimated daily
@@ -91,7 +93,8 @@ with the level network.
 ## Target Stock: MonoKAN Against The Same KAN In Every Information Window
 
 The core monotonicity test of the alternative design: the same soft-quantile policy with the certified MonoKAN level
-network and with the identical KAN without the certificate (`monokan.level_network: kan`, same parameter count,
+network and with the identical KAN without the certificate (`monokan.level_network: kan`; same initialisation through
+`calibrate_level`, same parameter count,
 1,892). Final setup (5,000 products, weighted objective, 2,400 epochs) in all three information windows, three seeds,
 the same 300 validation products. Regret:
 
@@ -106,10 +109,10 @@ minus KAN, reward per period:
 
 | Setting | Difference | 95% CI | paired t | Wilcoxon | MonoKAN ahead | Reading |
 |---|---:|---:|---:|---:|---:|---|
-| Final setup, all demand | `-0.44` | `[-1.97, +1.08]` | `0.569` | `0.0001` | 61% | tie on average, ahead on most products |
+| Final setup, all demand | `-0.44` | `[-1.97, +1.08]` | `0.569` | `0.0001` | 61% | no significant mean difference; ahead on most products |
 | Final setup, last 32 observations | `+1.81` | `[+0.16, +3.46]` | `0.032` | `< 0.0001` | 62% | small but consistent |
 | Final setup, initial 32 lags | `+2.64` | `[+0.17, +5.10]` | `0.036` | `0.464` | 51% | small and borderline |
-| 1,000 products, profit objective, last 32 observations | `+5.90` | `[+3.32, +8.48]` | `< 0.0001` | `< 0.0001` | 72% | clearly helps |
+| 1,000 products, profit objective, last 32 observations | `+5.90` | `[+3.32, +8.48]` | `< 0.0001` | `< 0.0001` | 72% | ahead on both tests |
 
 Rewards behind the table (MonoKAN / KAN): `4285.53` / `4285.97`, `4255.32` / `4253.51`, `4249.02` / `4246.38`, and
 `4260.45` / `4254.55`; the last row's regrets are `2.26%` / `3.35%`. In no setting is MonoKAN significantly behind.
@@ -125,11 +128,13 @@ designs see only the last 32 observations of demand:
 |---|---:|---:|
 | Who enforces "more stock, never a larger order" | the certificate | the subtraction in `max(S - I, 0)` |
 | Unconstrained arm: products that order more as stock rises | `35.1%` | `0%` (impossible) |
-| Certificate against the same KAN, reward per period | `-22.89` (`p < 0.0001`) | `+5.90` (`p < 0.0001`) |
+| Certified minus unconstrained KAN, reward per period | `-22.89` (`p < 0.0001`) | `+5.90` (`p < 0.0001`) |
 | MonoKAN regret | `15.71%` | `2.26%` |
 
-The certificate costs profit exactly where it does the work of enforcing the stock rule; where the structure already
-does that work it is free, and in this smaller setup it helps. With all demand observed so far the matched
+The certified model earned less where the certificate alone enforces the stock rule, and more where the structure
+already does that work. This is consistent with a certificate whose cost grows with the work it does, but the designs
+also differ in inputs, architecture and decoder, and the direct-quantity arms in initialisation, so this table does not
+isolate the stock constraint. With all demand observed so far the matched
 target-stock MonoKAN reaches `1.62%`.
 
 ## Classical Baselines
@@ -225,7 +230,7 @@ Regret:
 
 **The proposal's sample-efficiency claim is not supported, and the direction is reversed.** At 100 training products the monotone model is worse than the unconstrained MLP on both metrics. It needs more data, not less, and overtakes only at `n = 1000`.
 
-What the constraint does buy is reliable scaling: MonoKAN improves monotonically with data on both metrics, while the MLP peaks around `n = 100` to `300` and then degrades. Selected checkpoints sit near the end of the budget for both, so this is not undertraining.
+Across the three tested sizes MonoKAN improved monotonically on both metrics, while the MLP peaked around `n = 100` to `300` and then degraded; three sizes and three seeds do not establish this beyond the tested range. Selected checkpoints sit near the end of the budget for both, so this is not undertraining.
 
 The two metrics disagree at `n = 300`, so any reported crossover point depends on which is quoted.
 
@@ -236,7 +241,7 @@ Per-product reward has a standard deviation of `8,537` against a mean of `4,284`
 - **seed SEM**: training variability on a fixed product set. This is what `+/-` denotes elsewhere in this file.
 - **product SEM**: sampling variability of the product population. At 300 validation products the 95% CI on the population mean is roughly `+/- 966`.
 
-Comparisons are unaffected, because every policy is evaluated on identical products and demand paths, so the product variance cancels: the paired SEM is `+/- 2.40` against differences of 1 to 10 reward per period.
+Paired comparisons largely remove this product-level noise, because every policy is evaluated on identical products and demand paths, so the product variance cancels (selection on the same validation products is a separate limitation): the paired SEM is `+/- 2.40` against differences of 1 to 10 reward per period.
 
 Confirmation on 3,000 validation products, a strict superset of the 300 used for checkpoint selection (the generator draws sequentially from one seeded stream):
 
