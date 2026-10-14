@@ -48,9 +48,12 @@ KAN_METADATA = {
     "adaptive_grid_eps": 0.1,
     "sort_history_lags": True,
 }
-# ``kan`` is the unconstrained KAN as run for the report (constant initial output); ``kan_open`` is the same network
-# initialised exactly like MonoKAN (open readout), which separates the constraint from the initialisation.
-MODELS = ("monokan", "kan", "kan_open", "fcnn")
+# ``monokan`` and ``kan`` are the arms as run for the report: MonoKAN with an open readout, the KAN with a constant
+# initial output. ``kan_open`` and ``monokan_constant`` swap the initialisation, so every pairing below can also be
+# made from an identical start (open with open, constant with constant).
+MODELS = ("monokan", "kan", "kan_open", "monokan_constant", "fcnn")
+# (certified, unconstrained) pairs reported by :func:`summarize_runs` as ``<certified>_minus_<unconstrained>``.
+PAIRS = (("monokan", "kan"), ("monokan", "kan_open"), ("monokan_constant", "kan"))
 REPORTED_MODELS = ("monokan", "kan", "fcnn")
 SEEDS = (2025, 2026, 2027)
 
@@ -83,14 +86,16 @@ def load_setup(config_path: str | Path = CONFIG) -> DirectQuantitySetup:
 
 
 def build_model(name: str, setup: DirectQuantitySetup) -> nn.Module:
-    """Build one of ``MODELS``: ``monokan`` (certified), ``kan`` / ``kan_open`` (no certificate) or ``fcnn``."""
+    """Build one of ``MODELS``: certified (``monokan*``), unconstrained (``kan*``) or the paper ``fcnn``."""
     if name not in MODELS:
         raise ValueError(f"model must be one of {MODELS}")
     if name == "fcnn":
         return make_paper_fcnn_model(setup.config)
-    metadata = dict(KAN_METADATA, monotone=(name == "monokan"))
+    metadata = dict(KAN_METADATA, monotone=name.startswith("monokan"))
     if name == "kan_open":
         metadata["initialization"] = "open"
+    elif name == "monokan_constant":
+        metadata["initialization"] = "constant"
     return make_paper_raw_action_monokan_model_for_products(
         setup.config, setup.train_products, setup.feature_stats, metadata=metadata
     )
@@ -225,9 +230,9 @@ def summarize_runs(out_dir: str | Path) -> dict[str, Any]:
     """Pool the per-run result files of ``out_dir`` and write ``summary.json``.
 
     ``monokan_minus_kan`` is the profit gap between the certified and the unconstrained model as reported (same
-    architecture, different output initialisation); ``monokan_minus_kan_open`` compares with the unconstrained model
-    initialised like MonoKAN, so it isolates the constraint. Both are paired over the shared products with rewards
-    averaged over seeds.
+    architecture, different output initialisation). ``monokan_minus_kan_open`` (both open) and
+    ``monokan_constant_minus_kan`` (both constant) compare from an identical start. All are paired over the shared
+    products with rewards averaged over seeds.
     """
     out_dir = Path(out_dir)
     rows = [json.loads(path.read_text(encoding="utf-8")) for _, _, path in _run_files(out_dir, ".json")]
@@ -260,9 +265,11 @@ def summarize_runs(out_dir: str | Path) -> dict[str, Any]:
     def per_product(name: str) -> np.ndarray:
         return np.mean([row["per_product_reward"] for row in rows if row["model"] == name], axis=0)
 
-    for partner in ("kan", "kan_open"):
-        if "monokan" in summary and partner in summary:
-            summary[f"monokan_minus_{partner}"] = paired_difference(per_product("monokan"), per_product(partner))
+    for certified, unconstrained in PAIRS:
+        if certified in summary and unconstrained in summary:
+            summary[f"{certified}_minus_{unconstrained}"] = paired_difference(
+                per_product(certified), per_product(unconstrained)
+            )
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     return summary
 

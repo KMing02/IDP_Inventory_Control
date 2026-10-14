@@ -90,6 +90,9 @@ def test_kan_open_starts_like_monokan_while_the_reported_kan_starts_constant() -
     assert float(kan.layers[-1].scale_base.detach().abs().sum()) == 0.0
     assert float(kan_open.layers[-1].scale_base.detach().abs().sum()) > 0.0
     assert not kan_open.monotonic_vars
+    monokan_constant = build(monotone=True, initialization="constant")
+    assert monokan_constant.paper_initialization_mode == "global_empirical_newsvendor_median"
+    assert monokan_constant.monotonic_vars == monokan.monotonic_vars
     with pytest.raises(ValueError, match="initialization"):
         build(monotone=False, initialization="warm")
 
