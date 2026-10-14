@@ -3,8 +3,8 @@
 Under the target-stock decoder ``q = max(S - I, 0)`` the rule "order less when stock is higher" holds for every model,
 so a monotone network only certifies the economics. Here the network emits the order from on-hand stock, the last
 32 demands and the four economic inputs (1 + 32 + 4 = 37 inputs), so the stock direction has to come from the model.
-Three direct-quantity policies are compared under one protocol: MonoKAN, the same KAN without the certificate, and
-the paper's FCNN.
+MonoKAN and the same KAN without the certificate, each from two output initialisations, are compared with the
+paper's FCNN under one protocol.
 
 Each (model, seed) run writes its own result file, so runs can execute in parallel processes;
 :func:`summarize_runs` pools them.
@@ -26,7 +26,12 @@ from inventory_control.analysis import paired_difference, regret_pct
 from inventory_control.base_stock_output_experiment import _compact_settings, _evaluate_baseline
 from inventory_control.evaluation.torch_policy import batched_torch_policy_metrics
 from inventory_control.paper_configs import load_paper_lost_sales_config
-from inventory_control.paper_lost_sales import omniscient_gamma_base_stock_policy
+from inventory_control.paper_lost_sales import (
+    historical_empirical_quantile,
+    historical_gamma_quantile,
+    omniscient_gamma_base_stock_policy,
+    paper_critical_quantile,
+)
 from inventory_control.policies.neural.fcnn import (
     PaperFCNNFeatureStats,
     build_paper_lost_sales_features,
@@ -48,13 +53,19 @@ KAN_METADATA = {
     "adaptive_grid_eps": 0.1,
     "sort_history_lags": True,
 }
-# ``monokan`` and ``kan`` are the arms as run for the report: MonoKAN with an open readout, the KAN with a constant
+# ``monokan`` and ``kan`` are the arms as first run: MonoKAN with an open readout, the KAN with a constant
 # initial output. ``kan_open`` and ``monokan_constant`` swap the initialisation, so every pairing below can also be
 # made from an identical start (open with open, constant with constant).
 MODELS = ("monokan", "kan", "kan_open", "monokan_constant", "fcnn")
-# (certified, unconstrained) pairs reported by :func:`summarize_runs` as ``<certified>_minus_<unconstrained>``.
-PAIRS = (("monokan", "kan"), ("monokan", "kan_open"), ("monokan_constant", "kan"))
-REPORTED_MODELS = ("monokan", "kan", "fcnn")
+# Pairs reported by :func:`summarize_runs` as ``<first>_minus_<second>``: certified minus unconstrained (as first run
+# and from each identical start), then the effect of the start within each network (open minus constant).
+PAIRS = (
+    ("monokan", "kan"),
+    ("monokan", "kan_open"),
+    ("monokan_constant", "kan"),
+    ("monokan", "monokan_constant"),
+    ("kan_open", "kan"),
+)
 SEEDS = (2025, 2026, 2027)
 
 
@@ -203,11 +214,14 @@ def train_and_evaluate(name: str, seed: int, epochs: int, out_dir: str | Path,
     model.eval()
     torch.save(model.state_dict(), out_dir / f"{name}_{seed}.pt")
 
+    # Training does not cap the order, but evaluation does (the evaluator's default, used in every reported run):
+    # stock after ordering is kept at most ``max_order_factor`` times the initial mean demand. :func:`cap_sensitivity`
+    # re-evaluates the saved models without the cap.
     metrics = batched_torch_policy_metrics(
         setup.validation_products,
         model,
         setup.feature_stats,
-        settings={**settings, "scale_action_by_history_mean": True},
+        settings={**settings, "scale_action_by_history_mean": True, "enforce_action_cap": True},
         split="validation",
     )
     rewards = metrics["mean_reward_per_period"].to_numpy(dtype=float)
@@ -229,10 +243,11 @@ def train_and_evaluate(name: str, seed: int, epochs: int, out_dir: str | Path,
 def summarize_runs(out_dir: str | Path) -> dict[str, Any]:
     """Pool the per-run result files of ``out_dir`` and write ``summary.json``.
 
-    ``monokan_minus_kan`` is the profit gap between the certified and the unconstrained model as reported (same
+    ``monokan_minus_kan`` is the profit gap between the certified and the unconstrained model as first run (same
     architecture, different output initialisation). ``monokan_minus_kan_open`` (both open) and
-    ``monokan_constant_minus_kan`` (both constant) compare from an identical start. All are paired over the shared
-    products with rewards averaged over seeds.
+    ``monokan_constant_minus_kan`` (both constant) compare from an identical start, and
+    ``monokan_minus_monokan_constant`` and ``kan_open_minus_kan`` measure the start within each network. All are
+    paired over the shared products with rewards averaged over seeds.
     """
     out_dir = Path(out_dir)
     rows = [json.loads(path.read_text(encoding="utf-8")) for _, _, path in _run_files(out_dir, ".json")]
@@ -265,11 +280,9 @@ def summarize_runs(out_dir: str | Path) -> dict[str, Any]:
     def per_product(name: str) -> np.ndarray:
         return np.mean([row["per_product_reward"] for row in rows if row["model"] == name], axis=0)
 
-    for certified, unconstrained in PAIRS:
-        if certified in summary and unconstrained in summary:
-            summary[f"{certified}_minus_{unconstrained}"] = paired_difference(
-                per_product(certified), per_product(unconstrained)
-            )
+    for first, second in PAIRS:
+        if first in summary and second in summary:
+            summary[f"{first}_minus_{second}"] = paired_difference(per_product(first), per_product(second))
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     return summary
 
@@ -313,7 +326,8 @@ def implied_order_up_to(run_dir: str | Path, setup: DirectQuantitySetup | None =
     its implied order-up-to level, compared with the omniscient optimal level. ``raw_corr`` compares raw units, where
     product scale alone makes the match look good; ``scaled_corr`` compares per unit of mean demand, which removes
     scale and so tests whether the network learned the economics. Speed is the median CPU time of one decision and
-    of 10,000 decisions at once.
+    of 10,000 decisions at once. For reference, ``gamma_fit`` and ``empirical_quantile`` give the same match for the
+    classical rules on the same 32-day history, whose order-up-to level is explicit.
     """
     setup = setup or load_setup()
     seeds = seeds or saved_seeds(run_dir)
@@ -336,6 +350,14 @@ def implied_order_up_to(run_dir: str | Path, setup: DirectQuantitySetup | None =
         dtype=torch.float32,
     )
     one, batch = zero_stock[:1], zero_stock.repeat(10_000 // len(products) + 1, 1)[:10_000]
+
+    def level_match(implied: np.ndarray) -> dict[str, float]:
+        return {
+            "raw_corr": float(np.corrcoef(implied, optimal)[0, 1]),
+            "scaled_corr": float(np.corrcoef(implied / mean_demand, optimal / mean_demand)[0, 1]),
+            "median_rel_error": float(np.median(np.abs(implied - optimal) / np.maximum(optimal, 1e-9))),
+        }
+
     results: dict[str, list[dict[str, float]]] = {}
     for name in saved_models(run_dir):
         per_seed = []
@@ -356,14 +378,15 @@ def implied_order_up_to(run_dir: str | Path, setup: DirectQuantitySetup | None =
                     many.append(time.perf_counter() - start)
             per_seed.append({
                 "seed": seed,
-                "raw_corr": float(np.corrcoef(implied, optimal)[0, 1]),
-                "scaled_corr": float(np.corrcoef(implied / mean_demand, optimal / mean_demand)[0, 1]),
-                "median_rel_error": float(np.median(np.abs(implied - optimal) / np.maximum(optimal, 1e-9))),
+                **level_match(implied),
                 "ms_one": float(np.median(single) * 1e3),
                 "ms_10k": float(np.median(many) * 1e3),
                 "params": int(sum(p.numel() for p in model.parameters() if p.requires_grad)),
             })
         results[name] = per_seed
+    classical = {"gamma_fit": historical_gamma_quantile, "empirical_quantile": historical_empirical_quantile}
+    for name, estimate in classical.items():
+        results[name] = [level_match(np.array([estimate(p, paper_critical_quantile(p)) for p in products]))]
     return results
 
 
@@ -403,3 +426,38 @@ def largest_violation_curves(run_dir: str | Path, setup: DirectQuantitySetup | N
         **curves,
         "perfect": [perfect.act(level, 0) / mean_demand for level in stock],
     }
+
+
+def cap_sensitivity(run_dir: str | Path, setup: DirectQuantitySetup | None = None) -> dict[str, Any]:
+    """Re-evaluate the saved models without the order cap that :func:`train_and_evaluate` applies in evaluation.
+
+    Returns each model's reward and regret without the cap and the pairings of :func:`summarize_runs`, so the effect
+    of the cap on every reported comparison can be read off.
+    """
+    setup = setup or load_setup()
+    settings = {**setup.settings, "scale_action_by_history_mean": True, "enforce_action_cap": False}
+    omniscient = omniscient_rewards(setup.validation_products, setup.settings)
+    rewards: dict[str, list[np.ndarray]] = {}
+    for name, seed, _ in _run_files(run_dir, ".pt"):
+        metrics = batched_torch_policy_metrics(
+            setup.validation_products,
+            load_trained(name, seed, run_dir, setup),
+            setup.feature_stats,
+            settings=settings,
+            split="validation",
+        )
+        rewards.setdefault(name, []).append(metrics["mean_reward_per_period"].to_numpy(dtype=float))
+    result: dict[str, Any] = {
+        name: {
+            "seeds": len(runs),
+            "reward_per_period": float(np.mean(runs)),
+            "regret_pct": float(np.mean([regret_pct(run, omniscient) for run in runs])),
+        }
+        for name, runs in rewards.items()
+    }
+    for first, second in PAIRS:
+        if first in rewards and second in rewards:
+            result[f"{first}_minus_{second}"] = paired_difference(
+                np.mean(rewards[first], axis=0), np.mean(rewards[second], axis=0)
+            )
+    return result

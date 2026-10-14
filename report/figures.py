@@ -21,6 +21,7 @@ REPO = HERE.parent
 INTERPRETABILITY = HERE / "data"
 
 BLUE, DARK, LIGHT, GREY, ORANGE, GREEN = "#0065BD", "#003359", "#98C6EA", "#7F7F7F", "#E37222", "#A2AD00"
+PALE_ORANGE = "#F2B98C"
 COLORS = {"monokan": BLUE, "kan": ORANGE, "fcnn": GREY, "perfect": "#333333", "mlp": GREY}
 
 plt.rcParams.update({
@@ -46,15 +47,20 @@ def _save(fig, out_dir: Path, name: str) -> None:
 
 def violations(out_dir: Path) -> None:
     """Main design: how often the stock rule breaks, and what a break looks like."""
-    curves = json.loads((HERE / "data/violation_curves.json").read_text(encoding="utf-8"))
-    fig, (left, right) = plt.subplots(1, 2, figsize=(7.2, 2.7), gridspec_kw={"width_ratios": [1, 1.35]})
+    curves = json.loads((R.RUNS / "curves.json").read_text(encoding="utf-8"))
+    fig, (left, right) = plt.subplots(1, 2, figsize=(7.2, 2.9), gridspec_kw={"width_ratios": [1, 1.35]})
 
-    names = ["KAN, seed 2025", "KAN, seed 2026", "KAN, seed 2027", "MonoKAN, all seeds", "FCNN, all seeds"]
-    values = [*R.KAN_VIOLATION_BY_SEED.values(), 0.0, 0.0]
-    bars = left.barh(names[::-1], values[::-1], color=[GREY, BLUE, ORANGE, ORANGE, ORANGE], height=0.6)
-    for bar, value in zip(bars, values[::-1]):
+    rows = [
+        (f"KAN, {start} start, {seed}", value, color)
+        for name, start, color in (("kan", "constant", ORANGE), ("kan_open", "open", PALE_ORANGE))
+        for seed, value in zip(R.DIRECT[name]["seeds"], R.DIRECT[name]["violation_by_seed"])
+    ] + [("MonoKAN, both starts, all seeds", 0.0, BLUE), ("FCNN, all seeds", 0.0, GREY)]
+    names, values, colors = (list(column)[::-1] for column in zip(*rows))
+    bars = left.barh(names, values, color=colors, height=0.6)
+    for bar, value in zip(bars, values):
         left.text(bar.get_width() + 1.0, bar.get_y() + bar.get_height() / 2, f"{value:.1f}%", va="center",
-                  fontsize=8.5)
+                  fontsize=8)
+    left.tick_params(axis="y", labelsize=8)
     left.set_xlim(0, 62)
     left.set_xlabel("products that order more when stock rises")
     left.set_title("(a) Stock-rule breaks per training run")
@@ -83,15 +89,26 @@ def violations(out_dir: Path) -> None:
 
 def reaction_strength(out_dir: Path) -> None:
     """Main design: the direction is guaranteed, the strength is not."""
-    fig, ax = plt.subplots(figsize=(3.4, 2.3))
-    labels = ["Optimal", "Same KAN,\nno certificate", "MonoKAN", "Paper FCNN"]
-    values = [abs(R.OMNISCIENT_SLOPE), abs(R.DIRECT["kan"]["slope"]), abs(R.DIRECT["monokan"]["slope"]),
-              abs(R.DIRECT["fcnn"]["slope"])]
-    bars = ax.bar(labels, values, color=[COLORS["perfect"], ORANGE, BLUE, GREY], width=0.62)
-    for bar, value in zip(bars, values):
-        ax.text(bar.get_x() + bar.get_width() / 2, value + 0.02, f"{value:.2f}", ha="center", fontsize=8.5)
+    fig, ax = plt.subplots(figsize=(3.4, 2.4))
+    # (position, reduction, colour); the two KANs of each start stand side by side
+    bars = [
+        (0.0, R.OMNISCIENT_SLOPE, COLORS["perfect"]),
+        (1.0, R.DIRECT["monokan_constant"]["slope"], BLUE),
+        (1.4, R.DIRECT["kan"]["slope"], ORANGE),
+        (2.4, R.DIRECT["monokan"]["slope"], BLUE),
+        (2.8, R.DIRECT["kan_open"]["slope"], ORANGE),
+        (3.8, R.DIRECT["fcnn"]["slope"], GREY),
+    ]
+    for position, slope, color in bars:
+        ax.bar(position, abs(slope), color=color, width=0.36)
+        ax.text(position, abs(slope) + 0.02, f"{abs(slope):.2f}", ha="center", fontsize=7.5)
+    ax.set_xticks([0.0, 1.2, 2.6, 3.8], ["Optimal", "Constant\nstart", "Open\nstart", "Paper\nFCNN"])
+    ax.bar(0, 0, color=BLUE, label="MonoKAN")
+    ax.bar(0, 0, color=ORANGE, label="KAN, no certificate")
+    ax.legend(loc="upper right", bbox_to_anchor=(1.0, 0.84), fontsize=7.5)
     ax.axhline(1.0, color=GREY, lw=0.8, ls=":")
-    ax.text(3.45, 1.01, "one-for-one", fontsize=7.5, color=GREY, ha="right", va="bottom")
+    ax.text(4.0, 1.01, "one-for-one", fontsize=7.5, color=GREY, ha="right", va="bottom")
+    ax.set_xlim(-0.4, 4.2)
     ax.set_ylim(0, 1.15)
     ax.set_ylabel("order reduction per unit of stock")
     ax.grid(axis="x", visible=False)

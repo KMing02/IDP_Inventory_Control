@@ -1142,7 +1142,7 @@ def make_paper_raw_action_monokan_model_for_products(
         raise ValueError("the raw-action policy requires the raw_lags history feature mode")
     initial_order = empirical_newsvendor_target_ratio(products, feature_stats=feature_stats)
     # Dropping the constraints leaves the same architecture. By default ("auto",
-    # as in the reported runs) the two variants are initialised differently below:
+    # as in our first runs) the two variants are initialised differently below:
     # an open readout for the certified model, a constant output otherwise.
     # "open" or "constant" forces one start for either variant, so the constraint
     # can be compared from an identical initialisation.

@@ -1,11 +1,15 @@
 """Direct-quantity comparison (main design): MonoKAN, the same KAN without the certificate, and the paper FCNN.
 
+MonoKAN and the KAN each run from two output initialisations: ``monokan`` and ``kan`` as first run, and
+``monokan_constant`` and ``kan_open`` with the two starts swapped.
+
 Usage:
-    python scripts/run_direct_quantity_comparison.py train --models monokan,kan,fcnn \
+    python scripts/run_direct_quantity_comparison.py train --models monokan,kan,kan_open,monokan_constant,fcnn \
         --seeds 2025,2026,2027 --epochs 2400 --out outputs/direct_quantity
     python scripts/run_direct_quantity_comparison.py summarize outputs/direct_quantity
     python scripts/run_direct_quantity_comparison.py interpret outputs/direct_quantity
     python scripts/run_direct_quantity_comparison.py curves outputs/direct_quantity
+    python scripts/run_direct_quantity_comparison.py cap outputs/direct_quantity
 
 Every (model, seed) run writes its own result file and checkpoint, so ``train`` can run in parallel processes,
 for example one per model.
@@ -22,7 +26,7 @@ import torch
 
 from inventory_control.direct_quantity_experiment import (
     MODELS,
-    REPORTED_MODELS,
+    cap_sensitivity,
     implied_order_up_to,
     largest_violation_curves,
     summarize_runs,
@@ -34,8 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
     train = commands.add_parser("train", help="train and evaluate (model, seed) runs")
-    train.add_argument("--models", default=",".join(REPORTED_MODELS),
-                       help=f"comma-separated subset of {','.join(MODELS)}; kan_open is the KAN initialised like MonoKAN")
+    train.add_argument("--models", default=",".join(MODELS), help="comma-separated subset of the default")
     train.add_argument("--seeds", default="2025,2026,2027")
     train.add_argument("--epochs", type=int, default=2400)
     train.add_argument("--threads", type=int, default=2)
@@ -44,6 +47,7 @@ def parse_args() -> argparse.Namespace:
         ("summarize", "pool the run files into summary.json"),
         ("interpret", "implied order-up-to level and decision speed (writes interpretability.json)"),
         ("curves", "order-versus-stock curves where the KAN breaks the stock rule most (writes curves.json)"),
+        ("cap", "re-evaluate the saved models without the evaluation order cap (writes cap_sensitivity.json)"),
     ):
         command = commands.add_parser(name, help=text)
         command.add_argument("run_dir", type=Path)
@@ -68,9 +72,16 @@ def main() -> None:
             def mean(key: str) -> float:
                 return float(np.mean([row[key] for row in rows]))
 
-            print(f"{name:8s} params {rows[0]['params']:5d} | implied vs optimal level: corr {mean('raw_corr'):.3f}, "
-                  f"per unit of demand {mean('scaled_corr'):.3f} | {mean('ms_one'):.3f} ms per decision, "
-                  f"{mean('ms_10k'):.1f} ms per 10,000")
+            line = (f"{name:18s} implied vs optimal level: corr {mean('raw_corr'):.3f}, "
+                    f"per unit of demand {mean('scaled_corr'):.3f}")
+            if "params" in rows[0]:
+                line += (f" | params {rows[0]['params']:5d} | {mean('ms_one'):.3f} ms per decision, "
+                         f"{mean('ms_10k'):.1f} ms per 10,000")
+            print(line)
+    elif args.command == "cap":
+        results = cap_sensitivity(args.run_dir)
+        (args.run_dir / "cap_sensitivity.json").write_text(json.dumps(results, indent=1), encoding="utf-8")
+        print(json.dumps(results, indent=1))
     else:
         curves = largest_violation_curves(args.run_dir)
         (args.run_dir / "curves.json").write_text(json.dumps(curves), encoding="utf-8")

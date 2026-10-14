@@ -50,7 +50,9 @@ def _verdict(ours: float, classical: float) -> str:
 
 
 def _context() -> dict:
-    direct_paired = R.DIRECT_PAIRED
+    paired = R.DIRECT_PAIRED
+    breaks = [value for name in ("kan", "kan_open") for value in R.DIRECT[name]["violation_by_seed"]]
+    cap_rise = [R.UNCAPPED_REGRET[name] - R.DIRECT[name]["regret"] for name in ("monokan_constant", "kan", "monokan")]
     return {
         "R": R,
         "D": R.DIRECT,
@@ -58,10 +60,17 @@ def _context() -> dict:
         "M": R.TS_MONOKAN,
         "K": R.TS_KAN,
         "TP": R.TS_PAIRED,
-        "DP": direct_paired,
+        "DP": paired,
+        "DS": R.DIRECT_START,
+        "UP": R.UNCAPPED_PAIRED,
+        "IC": R.DIRECT_IMPLIED_CORR,
         "MA": R.MATCHED,
-        "KS": list(R.KAN_VIOLATION_BY_SEED.values()),
-        "cost_share": -direct_paired["mean"] / R.DIRECT["monokan"]["reward"] * 100,
+        "KS": R.DIRECT["kan"]["violation_by_seed"],
+        "KO": R.DIRECT["kan_open"]["violation_by_seed"],
+        "BREAKS": (min(breaks), max(breaks)),
+        "CAP_RISE": (min(cap_rise), max(cap_rise)),
+        "cost_share": -paired["constant"]["mean"] / R.DIRECT["monokan_constant"]["reward"] * 100,
+        "max_reaction": max(-arm["slope"] for arm in R.DIRECT.values()),
         **{f"verdict_{window}": _verdict(R.TS_MONOKAN[window][1], R.CLASSICAL["percentile"][window][1])
            for window in R.WINDOWS},
     }
@@ -71,20 +80,35 @@ def _signed(value: float) -> str:
     return _number(value, "+.2f")
 
 
+def _paired_row(label: str, row: dict, reading: str | None = None) -> str:
+    cells = (f'<td>{label}</td><td class="num">{_signed(row["mean"])}</td>'
+             f'<td class="num">[{_signed(row["ci"][0])}, {_signed(row["ci"][1])}]</td>'
+             f'<td class="num">{html.escape(row["p_t"])}</td><td class="num">{html.escape(row["p_w"])}</td>'
+             f'<td class="num">{row["ahead"]}%</td>')
+    return f"<tr>{cells}</tr>" if reading is None else f"<tr>{cells}<td>{reading}</td></tr>"
+
+
 def _tables() -> dict[str, str]:
+    direct = "\n".join(
+        f'<tr{" class=\"ours\"" if name.startswith("monokan") else ""}><td>{arm["label"]}</td><td>{arm["start"]}</td>'
+        f'<td class="num">{arm["reward"]:,.2f} ± {arm["reward_sd"]:.2f}</td><td class="num">{arm["regret"]:.2f}%</td>'
+        f'<td class="num">{arm["violation"]:.1f}%</td><td class="num">{_number(-arm["slope"], ".2f")}</td>'
+        f'<td class="num">{arm["params"]:,}</td></tr>'
+        for name, arm in R.DIRECT.items()
+    )
+    direct_labels = {
+        "constant": "Both constant",
+        "open": "Both open",
+        "first": "MonoKAN open, KAN constant (first runs)",
+    }
+    direct_paired = "\n".join(_paired_row(direct_labels[key], row) for key, row in R.DIRECT_PAIRED.items())
     labels = {
         "expanding": "Final setup, all demand seen so far",
         "rolling": "Final setup, last 32 days",
         "fixed": "Final setup, first 32 days",
         "matched": "1,000 products, profit objective, last 32 days",
     }
-    paired = "\n".join(
-        f'<tr><td>{labels[key]}</td><td class="num">{_signed(row["mean"])}</td>'
-        f'<td class="num">[{_signed(row["ci"][0])}, {_signed(row["ci"][1])}]</td>'
-        f'<td class="num">{html.escape(row["p_t"])}</td><td class="num">{html.escape(row["p_w"])}</td>'
-        f'<td class="num">{row["ahead"]}%</td><td>{row["reading"]}</td></tr>'
-        for key, row in R.TS_PAIRED.items()
-    )
+    paired = "\n".join(_paired_row(labels[key], row, row["reading"]) for key, row in R.TS_PAIRED.items())
     confirmation = "\n".join(
         f'<tr{" class=\"ours\"" if "5,000" in name else ""}><td>{name}</td>'
         f'<td class="num">{reward:,.2f}</td><td class="num">{regret:.2f}%</td></tr>'
@@ -97,7 +121,8 @@ def _tables() -> dict[str, str]:
         + "</tr>"
         for name in R.SAMPLE_REGRET
     )
-    return {"TS_PAIRED_ROWS": paired, "CONFIRMATION_ROWS": confirmation, "SAMPLE_ROWS": sample}
+    return {"DIRECT_ROWS": direct, "DIRECT_PAIRED_ROWS": direct_paired, "TS_PAIRED_ROWS": paired,
+            "CONFIRMATION_ROWS": confirmation, "SAMPLE_ROWS": sample}
 
 
 def _toc(template: str, pages: dict[str, int]) -> str:

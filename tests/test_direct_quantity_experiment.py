@@ -113,5 +113,6 @@ def test_kan_open_runs_are_kept_apart_from_kan_runs(tmp_path: Path) -> None:
     assert summary["kan_open"]["violation_pct_by_seed"] == [10.0]
     assert summary["monokan_minus_kan"]["mean"] == pytest.approx(-3.0)
     assert summary["monokan_minus_kan_open"]["mean"] == pytest.approx(-1.0)
+    assert summary["kan_open_minus_kan"]["mean"] == pytest.approx(-2.0)
     assert saved_seeds(tmp_path) == [2025]
 

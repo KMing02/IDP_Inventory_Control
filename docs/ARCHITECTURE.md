@@ -48,8 +48,9 @@ demand CV nu            ~ Uniform(0, 1)
 
 ## Experiments And Analysis
 
-- `inventory_control.direct_quantity_experiment`: the main comparison (MonoKAN, the same KAN without the certificate,
-  the paper FCNN), the stock sweep that counts rule violations, the implied order-up-to test and decision speed.
+- `inventory_control.direct_quantity_experiment`: the main comparison (MonoKAN and the same KAN without the
+  certificate, each from two output initialisations, and the paper FCNN), the stock sweep that counts rule violations,
+  the implied order-up-to test and decision speed, and the re-evaluation without the evaluation order cap.
 - `inventory_control.base_stock_output_experiment`: the target-stock runner behind the alternative design and the
   historical DeepGrid7 and FCNN direct target-stock runs.
 - `inventory_control.classical_windows`: classical rules in all three information windows.

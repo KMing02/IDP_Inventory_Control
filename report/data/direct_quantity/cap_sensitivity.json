@@ -1,0 +1,77 @@
+{
+ "kan": {
+  "seeds": 3,
+  "reward_per_period": 4231.829338283521,
+  "regret_pct": 14.127062072074352
+ },
+ "kan_open": {
+  "seeds": 3,
+  "reward_per_period": 3459.7304769749535,
+  "regret_pct": 118.81335915736854
+ },
+ "monokan": {
+  "seeds": 3,
+  "reward_per_period": 4209.170770046251,
+  "regret_pct": 17.260394971288015
+ },
+ "monokan_constant": {
+  "seeds": 3,
+  "reward_per_period": 4216.539096539519,
+  "regret_pct": 15.802933228276123
+ },
+ "monokan_minus_kan": {
+  "mean": -22.65856823727074,
+  "ci95": [
+   -32.248107022181905,
+   -13.069029452359574
+  ],
+  "p_paired_t": 4.990436181485191e-06,
+  "p_wilcoxon": 1.7720750860908723e-14,
+  "first_ahead_pct": 28.333333333333332,
+  "products": 300
+ },
+ "monokan_minus_kan_open": {
+  "mean": 749.4402930712976,
+  "ci95": [
+   535.6989452031964,
+   963.1816409393987
+  ],
+  "p_paired_t": 3.107438448738252e-11,
+  "p_wilcoxon": 5.051149503430669e-38,
+  "first_ahead_pct": 84.0,
+  "products": 300
+ },
+ "monokan_constant_minus_kan": {
+  "mean": -15.290241744003342,
+  "ci95": [
+   -24.208196935187225,
+   -6.372286552819462
+  ],
+  "p_paired_t": 0.000838240834235381,
+  "p_wilcoxon": 1.4178062895472152e-10,
+  "first_ahead_pct": 29.666666666666668,
+  "products": 300
+ },
+ "monokan_minus_monokan_constant": {
+  "mean": -7.3683264932673955,
+  "ci95": [
+   -16.745375943878063,
+   2.008722957343271
+  ],
+  "p_paired_t": 0.12307399185788133,
+  "p_wilcoxon": 0.0005027199302542059,
+  "first_ahead_pct": 44.333333333333336,
+  "products": 300
+ },
+ "kan_open_minus_kan": {
+  "mean": -772.0988613085683,
+  "ci95": [
+   -986.9837062074985,
+   -557.2140164096381
+  ],
+  "p_paired_t": 1.0920277838501962e-11,
+  "p_wilcoxon": 5.663496526112573e-43,
+  "first_ahead_pct": 9.333333333333334,
+  "products": 300
+ }
+}

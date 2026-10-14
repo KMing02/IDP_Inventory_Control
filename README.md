@@ -27,19 +27,24 @@ the same training and evaluation protocol, in the lost-sales setting of Maggiar 
 Regret is the mean per-product shortfall against the omniscient policy that knows the true demand distribution
 (0% is perfect); every comparison is paired over the same 300 validation products and three seeds.
 
-**Main design: the guarantee does real work, and the certified model earned less.** Without the certificate, the
-same KAN orders more when stock rises on 35.1% of products (9 to 51% depending on the seed); MonoKAN never does. Under
-our training procedures MonoKAN earned 22.89 less per period than that KAN (95% CI 13.20 to 32.57, p < 0.0001), about
-0.5% of profit. The two networks were also initialised differently (MonoKAN with an open readout calibrated to the empirical newsvendor level, the KAN with a constant output at that level), so the gap is not purely the cost of the constraint; a rerun with identical initialisation would isolate it. All direct-quantity networks lower their order by only 0.34 to 0.54 units per unit
-of stock, against 0.90 for the optimal policy, and none beats a classical rule with the same
-32-day information.
+**Main design: the guarantee does real work, and its profit cost depends on the start.** Without the certificate,
+the same KAN orders more when stock rises in every training run, on 9 to 51% of products; MonoKAN never does. Started
+from the same initialisation, MonoKAN earned 14.11 less per period than that KAN when both started with a constant
+output (95% CI 5.90 to 22.32, p = 0.0008), about 0.3% of profit, and 548 more when both started with an open readout,
+from which the unconstrained KAN barely learned to react to stock. The first runs mixed the two starts (MonoKAN open,
+KAN constant) and showed a gap of 22.89. All direct-quantity networks lower their order by at most 0.54 units per unit
+of stock, against 0.90 for the optimal policy, and none beats a classical rule with the same 32-day window. Evaluation,
+unlike training, caps stock after ordering at four times the initial mean demand; without the cap the constant-start
+gap is -15.29 and the open-start gap +749, so no conclusion depends on it.
 
-| Direct quantity | Profit / period | Regret | Products ordering more as stock rises |
-|---|---:|---:|---:|
-| MonoKAN (certified) | 4206.43 | 15.71% | 0% |
-| Same KAN, no certificate | 4229.31 | 13.33% | 35.1% |
-| Paper FCNN | 3874.38 | 20.64% | 0% |
-| Classical rules, last 32 days | 4255.93 – 4275.37 | 1.25 – 1.90% | 0% |
+| Direct quantity | Start | Profit / period | Regret | Products ordering more as stock rises |
+|---|---|---:|---:|---:|
+| MonoKAN (certified) | constant | 4215.20 | 14.60% | 0% |
+| Same KAN, no certificate | constant | 4229.31 | 13.33% | 35.1% |
+| MonoKAN (certified) | open | 4206.43 | 15.71% | 0% |
+| Same KAN, no certificate | open | 3658.28 | 48.78% | 23.6% |
+| Paper FCNN | own | 3874.38 | 20.64% | 0% |
+| Classical rules, last 32 days | - | 4255.93 – 4275.37 | 1.25 – 1.90% | 0% |
 
 **Alternative design: the structure does the work, and no profit cost of the guarantee was detected.** The final policy reaches 0.80%
 regret (0.78% on 3,000 products) with 1,892 parameters. In every information window it beats the same KAN without the
@@ -54,10 +59,10 @@ certificate on regret; against a good classical rule with the same information i
 \* also told that demand is Gamma distributed.
 
 **Matched comparison.** With 1,000 training products and both designs seeing only the last 32 days, the certified
-model earns 22.89 less per period in the main design and 5.90 *more* in the alternative (p < 0.0001 both), and regret is
-15.71% against 2.26%. This is consistent with a guarantee that costs more where it has to enforce the stock rule by
-itself, but the two designs differ in more than the constraint (and the main design's arms in initialisation), so the
-comparison does not isolate the stock constraint.
+model earns 14.11 less per period in the main design (both networks from the constant start, p = 0.0008) and 5.90
+*more* in the alternative (p < 0.0001), and regret is 14.60% against 2.26%. This is consistent with a guarantee that
+costs more where it has to enforce the stock rule by itself, but the two designs differ in more than the constraint,
+so the comparison does not isolate the stock constraint.
 
 `docs/EXPERIMENTS.md` has every number with its confidence interval, the controls, the negative results and the
 command that reproduces it.
@@ -75,7 +80,7 @@ configs/                        final configs (see docs/ARCHITECTURE.md)
 scripts/                        command-line entry points
 tests/                          correctness tests
 docs/                           evidence index, code map, record of defects that affected results
-report/                         final report (PDF) and the script that builds it
+report/                         final report (PDF), the script that builds it, stored main-design runs (data/)
 ```
 
 ## Running

@@ -1,12 +1,16 @@
 """Every number the final report quotes, in one place, with its source.
 
-The numbers were transcribed from the experiment outputs, not read from files at build time. Provenance per block:
+Provenance per block:
 
-- DIRECT, DIRECT_PAIRED, KAN_*, FCNN_*, OMNISCIENT_SLOPE: ``run_direct_quantity_comparison.py train`` then ``summarize``
-  (code of commit 0f2b8fa, 2,400 epochs, seeds 2025-2027), recorded in docs/EXPERIMENTS.md at 226f001.
-  DIRECT_IMPLIED_CORR, CLASSICAL_IMPLIED_CORR, DIRECT_MS*: ``... interpret`` on the same checkpoints.
-  The per-run result files and checkpoints were not kept; the curves of Figure 2b were taken from the chart of the
-  final presentation (data/violation_curves.json).
+- Main design, MonoKAN and KAN arms (DIRECT except "fcnn", DIRECT_PAIRED, DIRECT_START, UNCAPPED_*,
+  DIRECT_IMPLIED_CORR, CLASSICAL_IMPLIED_CORR): read at build time from data/direct_quantity, the stored outputs of
+  ``run_direct_quantity_comparison.py`` ``train`` (2,400 epochs, seeds 2025-2027; code of commit 8f8ce81, and of
+  adac033 for monokan_constant), ``summarize``, ``interpret``, ``curves`` (Figure 2b) and ``cap``. The arms
+  ``monokan`` and ``kan`` reproduce the first runs (commit 0f2b8fa, recorded in docs/EXPERIMENTS.md at 226f001) to
+  every reported digit, and the curves of Figure 2b exactly.
+- DIRECT["fcnn"], FCNN_*, OMNISCIENT_*, DIRECT_MS*: transcribed from those first runs, whose result files were not
+  kept. The decision times of MonoKAN and the FCNN were measured in one session; timings depend on machine load,
+  so ``interpret`` on the stored checkpoints gives different absolute times.
 - CLASSICAL: ``run_classical_windows.py`` (reproduced exactly at f1e2f20).
 - TS_MONOKAN, TS_KAN, TS_PAIRED, MATCHED: ``run_soft_quantile_monokan.py`` with the --set overrides listed in
   Appendix A, compared with ``compare_target_stock_runs.py``. Only the final MonoKAN run (expanding window) is kept
@@ -19,27 +23,76 @@ The numbers were transcribed from the experiment outputs, not read from files at
 Rewards are profit per period averaged over the 300 validation products and three seeds; regret is in percent.
 """
 
+import json
+from pathlib import Path
+
 # ---------------------------------------------------------------- main design: direct quantity (1,000 products)
+RUNS = Path(__file__).parent / "data" / "direct_quantity"
+_SUMMARY = json.loads((RUNS / "summary.json").read_text(encoding="utf-8"))
+_LEVELS = json.loads((RUNS / "interpretability.json").read_text(encoding="utf-8"))
+_UNCAPPED = json.loads((RUNS / "cap_sensitivity.json").read_text(encoding="utf-8"))
+
+
+def _arm(name: str, label: str, start: str) -> dict:
+    row = _SUMMARY[name]
+    return {
+        "label": label,
+        "start": start,
+        "seeds": row["seeds"],
+        "reward": row["reward_per_period"],
+        "reward_sd": row["reward_seed_std"],
+        "regret": row["regret_pct"],
+        "violation": row["products_with_any_violation_pct"],
+        "violation_by_seed": row["violation_pct_by_seed"],
+        "violating_steps": row["violating_steps_pct"],
+        "worst_rise": row["worst_rise_in_mean_demand_units"] * 100,  # percent of a day's mean demand
+        "slope": row["mean_inventory_slope"],
+        "params": row["params"],
+    }
+
+
+def _p_value(value: float) -> str:
+    return "< 0.0001" if value < 1e-4 else f"{value:.4f}" if value < 0.01 else f"{value:.3f}"
+
+
+def _paired(row: dict) -> dict:
+    return {"mean": row["mean"], "ci": tuple(row["ci95"]), "p_t": _p_value(row["p_paired_t"]),
+            "p_w": _p_value(row["p_wilcoxon"]), "ahead": round(row["first_ahead_pct"])}
+
+
+# Each KAN starts from one of two output initialisations (Section 4.1): "constant" starts every product at the
+# empirical newsvendor order, "open" starts the output layer with nonzero weights and that order as its median.
 DIRECT = {
-    "monokan": {"label": "MonoKAN (certified)", "reward": 4206.43, "reward_sd": 17.56, "regret": 15.71,
-                "violation": 0.0, "slope": -0.524, "params": 4265},
-    "kan": {"label": "Same KAN, no certificate", "reward": 4229.31, "reward_sd": 10.88, "regret": 13.33,
-            "violation": 35.1, "slope": -0.541, "params": 4265},
-    "fcnn": {"label": "Paper FCNN", "reward": 3874.38, "reward_sd": 622.50, "regret": 20.64,
+    "monokan_constant": _arm("monokan_constant", "MonoKAN (certified)", "constant"),
+    "kan": _arm("kan", "Same KAN, no certificate", "constant"),
+    "monokan": _arm("monokan", "MonoKAN (certified)", "open"),
+    "kan_open": _arm("kan_open", "Same KAN, no certificate", "open"),
+    "fcnn": {"label": "Paper FCNN", "start": "—", "reward": 3874.38, "reward_sd": 622.50, "regret": 20.64,
              "violation": 0.0, "slope": -0.339, "params": 2105},
 }
+# MonoKAN minus the same KAN, paired over products (seed-averaged rewards): from the same constant start, from the
+# same open start, and as first run (MonoKAN open, KAN constant)
+DIRECT_PAIRED = {
+    "constant": _paired(_SUMMARY["monokan_constant_minus_kan"]),
+    "open": _paired(_SUMMARY["monokan_minus_kan_open"]),
+    "first": _paired(_SUMMARY["monokan_minus_kan"]),
+}
+# the start within each network, open minus constant
+DIRECT_START = {"monokan": _paired(_SUMMARY["monokan_minus_monokan_constant"]),
+                "kan": _paired(_SUMMARY["kan_open_minus_kan"])}
+# the same checkpoints evaluated without the order cap that evaluation applies (Section 4.1)
+UNCAPPED_PAIRED = {"constant": _paired(_UNCAPPED["monokan_constant_minus_kan"]),
+                   "open": _paired(_UNCAPPED["monokan_minus_kan_open"])}
+UNCAPPED_REGRET = {name: _UNCAPPED[name]["regret_pct"] for name in DIRECT if name in _UNCAPPED}
 OMNISCIENT_REWARD = 4297.45
 OMNISCIENT_SLOPE = -0.903
-KAN_VIOLATION_BY_SEED = {2025: 45.3, 2026: 8.7, 2027: 51.3}
-KAN_VIOLATING_STEPS = 3.7  # percent of swept stock steps
-KAN_WORST_RISE = 10.9  # percent of one day's mean demand
 FCNN_COLLAPSED = {"seed": 2027, "reward": 3155.76, "regret": 42.43}
 FCNN_HEALTHY_REWARD = 4233.69
-# MonoKAN minus the same KAN, paired over products (seed-averaged rewards)
-DIRECT_PAIRED = {"mean": -22.89, "ci": (-32.57, -13.20), "p_t": "< 0.0001", "p_w": "< 0.0001", "ahead": 28}
-# interpretability (Maggiar et al. Figure 3 test, per unit of mean demand) and speed
-DIRECT_IMPLIED_CORR = 0.49
-CLASSICAL_IMPLIED_CORR = 0.93
+# interpretability (Maggiar et al. Figure 3 test): correlation of the implied order-up-to level with the optimal
+# level, per unit of mean demand, averaged over seeds; and decision speed
+DIRECT_IMPLIED_CORR = {name: sum(row["scaled_corr"] for row in _LEVELS[name]) / len(_LEVELS[name])
+                       for name in DIRECT if name in _LEVELS}
+CLASSICAL_IMPLIED_CORR = _LEVELS["gamma_fit"][0]["scaled_corr"]
 DIRECT_MS = {"monokan": 0.41, "fcnn": 0.20}
 DIRECT_MS_10K = 57
 

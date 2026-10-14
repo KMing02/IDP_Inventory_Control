@@ -24,46 +24,84 @@ Following the supervisor's feedback this is the main formulation. Under the orde
 `q = max(S - I, 0)` supplies monotonicity in inventory for every model, so the certificate only binds on the four
 economic inputs. Here the network emits the order with inventory as input 0, and all 37 input directions are
 certified. Three seeds, 2,400 epochs, 1,000 training products, profit objective, and the same 300 validation
-products as the target-stock controls; reproduced by
-`python scripts/run_direct_quantity_comparison.py train` followed by `summarize`.
+products as the target-stock controls. The order is `softplus(output) x` the mean of the initial 32-observation
+history.
 
-| Policy | Reward | Regret | Products violating | Order drop per unit of stock | Params | Status |
-|---|---:|---:|---:|---:|---:|---|
-| Raw-action MonoKAN | `4206.43 +/- 17.56` | `15.71%` | `0.0%` | `-0.524` | 4,265 | FINAL MAIN |
-| Raw-action KAN, constraint removed | `4229.31 +/- 10.88` | `13.33%` | `35.1%` | `-0.541` | 4,265 | FINAL CONTROL |
-| Raw-action paper FCNN | `3874.38 +/- 622.50` | `20.64%` | `0.0%` | `-0.339` | 2,105 | FINAL CONTROL |
-| Omniscient base stock, same sweep | `4297.45` | `0.00%` | `0.0%` | `-0.903` | - | REFERENCE |
+MonoKAN and the KAN each run from two output initialisations. *Constant*: output-layer weights zero, so every
+product starts at the median empirical newsvendor order per unit of mean demand. *Open*: nonzero output weights, with
+the bias shifted so that the median initial order on reference contexts is that level. The first runs started
+MonoKAN open and the KAN constant (the factory default, `initialization: auto`); `monokan_constant` and `kan_open`
+complete the grid. The result files of all twelve KAN runs, with `summary.json`, `interpretability.json`,
+`curves.json` and `cap_sensitivity.json`, are stored in `report/data/direct_quantity`, and the report reads them;
+reproduced by `python scripts/run_direct_quantity_comparison.py train` followed by `summarize`, `interpret`,
+`curves` and `cap`. The `monokan` and `kan` reruns reproduce the first runs (commit `0f2b8fa`) to every reported
+digit.
 
-The certificate binds here. The unconstrained KAN orders more as stock rises on 35.1%
-of products (45.3%, 8.7%, 51.3% by seed); the certified model is at 0% by construction. The violations are
-widespread and not always small: 3.7% of swept steps, and the worst rise is
-`0.109` mean-demand units, about 11% of a day's demand. The violation rate is architecture dependent: the
-feed-forward arm violates on 0.0% of products. The FCNN arm is unstable: seed 2027 collapsed to `3155.76` (`42.43%` regret), as the same seed did at 400 epochs; the other seeds average `4233.69`, above the certified model, so its three-seed mean understates what a successful run achieves.
+| Policy | Start | Reward (+/- seed SD) | Regret | Products violating | Order drop per unit of stock | Params | Status |
+|---|---|---:|---:|---:|---:|---:|---|
+| Raw-action MonoKAN | constant | `4215.20 +/- 5.64` | `14.60%` | `0.0%` | `-0.461` | 4,265 | FINAL MAIN |
+| Raw-action KAN, constraint removed | constant | `4229.31 +/- 10.88` | `13.33%` | `35.1%` | `-0.541` | 4,265 | FINAL CONTROL |
+| Raw-action MonoKAN | open | `4206.43 +/- 17.56` | `15.71%` | `0.0%` | `-0.524` | 4,265 | FINAL MAIN |
+| Raw-action KAN, constraint removed | open | `3658.28 +/- 147.26` | `48.78%` | `23.6%` | `-0.022` | 4,265 | FINAL CONTROL |
+| Raw-action paper FCNN | own | `3874.38 +/- 622.50` | `20.64%` | `0.0%` | `-0.339` | 2,105 | FINAL CONTROL |
+| Omniscient base stock, same sweep | - | `4297.45` | `0.00%` | `0.0%` | `-0.903` | - | REFERENCE |
 
-The certified model also earned less here. Paired over the 300 products (seed-averaged), MonoKAN minus the
-unconstrained KAN is
-`-22.89` per period, 95% CI `[-32.57, -13.20]`, paired t `p < 0.0001`,
-Wilcoxon `p < 0.0001`; MonoKAN is ahead on 28% of products. The two networks were also initialised differently (MonoKAN with an open readout calibrated to the empirical newsvendor level, the KAN with a constant output at that level), so the gap is not purely the cost of the constraint; a rerun with identical initialisation would isolate it. The paired test treats the
-trained models as given (rewards averaged over seeds first), so its interval reflects variation across products, not
-retraining. Under the target-stock decoder at the same budget no profit difference to an MLP level network was
-detected (`-0.08`, `p = 0.94`); there the subtraction already enforces the inventory direction.
+The certificate binds here. From the constant start the unconstrained KAN orders more as stock rises on 35.1% of
+products (45.3%, 8.7%, 51.3% by seed). The violations are widespread and not always small: 3.7% of swept steps, and
+the worst rise is `0.109` mean-demand units, about 11% of a day's demand. From the open start it violates on 23.6%
+(19.7%, 16.0%, 35.0%) at 7.9% of swept steps, but the rises are tiny (worst `0.002` mean-demand units) because that
+KAN barely reacts to stock at all. The certified model is at 0% from both starts by construction. The violation rate
+is architecture dependent: the feed-forward arm violates on 0.0% of products. The FCNN arm is unstable: seed 2027
+collapsed to `3155.76` (`42.43%` regret), as the same seed did at 400 epochs; the other seeds average `4233.69`, above
+every KAN arm's three-seed mean, so its three-seed mean understates what a successful run achieves.
+
+Profit, MonoKAN minus the same KAN, paired over the 300 products (rewards averaged over seeds first):
+
+| Start | Difference | 95% CI | Paired t | Wilcoxon | MonoKAN ahead |
+|---|---:|---:|---:|---:|---:|
+| Both constant | `-14.11` | `[-22.32, -5.90]` | `p = 0.0008` | `p < 0.0001` | 32% |
+| Both open | `+548.15` | `[+390.33, +705.97]` | `p < 0.0001` | `p < 0.0001` | 82% |
+| First runs: MonoKAN open, KAN constant | `-22.89` | `[-32.57, -13.20]` | `p < 0.0001` | `p < 0.0001` | 28% |
+
+From the start that suits both networks (constant), the certificate costs about 14 per period, 0.3% of profit; it
+covers all 37 directions, so this does not isolate the stock rule. From the open start the unconstrained KAN fails
+(order drop `-0.022`, regret `48.78%`, seed SD `147`), while MonoKAN barely depends on its start. Open minus constant
+within each network: MonoKAN `-8.78` (`[-17.06, -0.50]`, t `p = 0.038`, Wilcoxon `p = 0.002`), KAN `-571.03`
+(`[-732.44, -409.62]`). The first-run gap is the constant-start gap plus MonoKAN's own loss from its start
+(`-14.11 - 8.78 = -22.89`). Why the open start fails for the unconstrained KAN has not been investigated. The paired
+test treats the trained models as given, so its interval reflects variation across products, not retraining. Under
+the target-stock decoder at the same budget no profit difference to an MLP level network was detected (`-0.08`,
+`p = 0.94`); there the subtraction already enforces the inventory direction.
+
+Evaluation cap. Training does not cap the order (`enforce_action_cap=False`), but evaluation does: stock after
+ordering is kept at most `max_order_factor = 4` times the initial mean demand. This is the evaluator's default, which
+applies because the compact settings do not carry the config's `idp_benchmark.enforce_action_cap: false`; it holds for
+every reported direct-quantity run, the FCNN's included, and `train_and_evaluate` now sets it explicitly. The cap
+cannot break a certified direction (it falls with stock and rises with the mean). Re-evaluated without it (`cap`):
+constant-start gap `-15.29` (`[-24.21, -6.37]`), open-start gap `+749.44` (`[+535.70, +963.18]`); regret rises by
+0.8 to 1.6 points for the three arms that trained well (KAN `14.13%`, MonoKAN constant `15.80%`, MonoKAN open
+`17.26%`) and to `118.81%` for the open-start KAN, whose excessive orders the cap cuts. No conclusion changes.
 
 No direct-quantity policy reacts to stock with more than 60% of the omniscient policy's
-`-0.90` on the same sweep, and none beats the classical rules that see the same information, the last 32 observations re-estimated daily
-(`1.25%` Gamma fit, `1.90%` empirical quantile). The matched
+`-0.90` on the same sweep, and none beats the classical rules that see the same 32-day window, the last 32
+observations re-estimated daily (`1.25%` Gamma fit, `1.90%` empirical quantile). The matched
 target-stock MonoKAN reaches `1.62%` regret at the same 1,000 products and 2,400 epochs: the decoder supplies the
 ordering strength, the certificate only the direction.
 
-A 400-epoch pilot of the same comparison (superseded) gave the same qualitative picture: 48.1% of products violating
-for the unconstrained KAN, 0% for the certified model and the FCNN, and a cost of about 66 per period.
+A 400-epoch pilot of the same comparison (superseded, first-run starts) gave the same qualitative picture: 48.1% of
+products violating for the unconstrained KAN, 0% for the certified model and the FCNN, and a gap of about 66 per
+period.
 
 Interpretability, by the test of Maggiar et al. (2025, Figure 3): the order a direct-quantity policy places at zero
 stock is its implied order-up-to level. Per unit of mean demand, which removes product scale, MonoKAN's implied level
-correlates `0.49` with the omniscient level, against `0.93` for the classical Gamma fit on the same 32-day history; in
-raw units scale alone makes every policy look good. The certificate fixes each input's direction, not the level.
-Speed: `0.41` ms per decision for MonoKAN against `0.20` ms for the FCNN (median CPU time, one decision); 10,000
-decisions at once take about `57` ms. Reproduced by `run_direct_quantity_comparison.py interpret`; the
-order-versus-stock curves of the worst break come from `run_direct_quantity_comparison.py curves`.
+correlates `0.49` (open start) and `0.43` (constant start) with the omniscient level, the unconstrained KAN `0.62`
+(constant) and `-0.27` (open), against `0.93` for the classical Gamma fit on the same 32-day history (`0.88` for the
+empirical quantile); in raw units scale alone makes every policy look good. The certificate fixes each input's
+direction, not the level. Speed: `0.41` ms per decision for MonoKAN against `0.20` ms for the FCNN (median CPU time,
+one decision, measured in one session on the first runs); 10,000 decisions at once take about `57` ms. Absolute times
+depend on machine load: `interpret` on the stored checkpoints gave `0.30` to `0.36` ms for the four KAN arms.
+Reproduced by `run_direct_quantity_comparison.py interpret`; the order-versus-stock curves of the worst break come
+from `run_direct_quantity_comparison.py curves`.
 
 ## Target-Stock Evidence (Alternative Design)
 
@@ -127,14 +165,13 @@ designs see only the last 32 observations of demand:
 | | Direct quantity | Target stock |
 |---|---:|---:|
 | Who enforces "more stock, never a larger order" | the certificate | the subtraction in `max(S - I, 0)` |
-| Unconstrained arm: products that order more as stock rises | `35.1%` | `0%` (impossible) |
-| Certified minus unconstrained KAN, reward per period | `-22.89` (`p < 0.0001`) | `+5.90` (`p < 0.0001`) |
-| MonoKAN regret | `15.71%` | `2.26%` |
+| Unconstrained arm: products that order more as stock rises | `8.7%` to `51.3%` per run | `0%` (impossible) |
+| Certified minus unconstrained KAN from the same start, reward per period | `-14.11` (`p = 0.0008`) from constant; `+548.15` from open | `+5.90` (`p < 0.0001`) |
+| MonoKAN regret | `14.60%` (constant), `15.71%` (open) | `2.26%` |
 
-The certified model earned less where the certificate alone enforces the stock rule, and more where the structure
-already does that work. This is consistent with a certificate whose cost grows with the work it does, but the designs
-also differ in inputs, architecture and decoder, and the direct-quantity arms in initialisation, so this table does not
-isolate the stock constraint. With all demand observed so far the matched
+The certified model earned slightly less where the certificate alone enforces the stock rule (from the start that
+suits both networks), and more where the structure already does that work. This is consistent with a certificate whose cost grows with the work it does, but the designs
+also differ in inputs, architecture and decoder, so this table does not isolate the stock constraint. With all demand observed so far the matched
 target-stock MonoKAN reaches `1.62%`.
 
 ## Classical Baselines
@@ -280,7 +317,7 @@ All commands run from the repository root; each target-stock command trains one 
 
 | Evidence | Command |
 |---|---|
-| Direct quantity, all three arms | `python scripts/run_direct_quantity_comparison.py train --out outputs/direct_quantity`, then `summarize`, `interpret` and `curves` on that directory |
+| Direct quantity, all five arms | `python scripts/run_direct_quantity_comparison.py train --out outputs/direct_quantity`, then `summarize`, `interpret`, `curves` and `cap` on that directory (stored results: `report/data/direct_quantity`) |
 | Final target-stock policy | `python scripts/run_soft_quantile_monokan.py --seed 2025 --output-dir outputs/ts_monokan/seed_2025` |
 | Same policy, KAN without the certificate | add `--set monokan.level_network=kan` |
 | Last 32 observations only | add `--set monokan.window_mode=sliding` |
