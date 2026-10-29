@@ -3,6 +3,11 @@
 Code for an Interdisciplinary Project (IDP) at the TUM Chair of Logistics and Supply Chain Management, by Qi Zhang and
 Keming Lin, examined by Prof. Dr. Stefan Minner. The final report is [`report/IDP_Final_Report.pdf`](report/IDP_Final_Report.pdf).
 
+The approved submission PDF and its matching, authoritative LaTeX source are preserved in
+[`report/revised/`](report/revised/). See [`report/REVISED_REPORT_README.md`](report/REVISED_REPORT_README.md)
+for compilation and [`report/RESULTS_PROVENANCE.md`](report/RESULTS_PROVENANCE.md) for the supplied evidence and its limits.
+The older HTML report generator is retained as historical tooling; it does not generate the approved report.
+
 ## Question
 
 A neural network can learn an ordering policy end to end, but it can also learn decisions no manager would accept,
@@ -17,24 +22,27 @@ the same training and evaluation protocol, in the lost-sales setting of Maggiar 
   days of demand, and price, purchase cost, holding cost and lost-sale penalty (1 + 32 + 4). MonoKAN certifies the
   direction of every input, including "more stock, never a larger order".
 - **Target stock (alternative design).** A small MonoKAN reads only the four economic inputs and chooses a demand
-  percentile; a fixed formula turns it into an order-up-to level `S` over observed demand and orders
+  percentile; a structured decoder with learned smoothing and gain produces an order-up-to level `S` over observed demand and orders
   `q = max(S - I, 0)`. The subtraction already enforces the stock rule, so the certificate only covers the economics.
   Maggiar et al. suggest this route but call it fragile: it only works because the best policy here is known to be
   order-up-to.
 
 ## Results
 
-Regret is the mean per-product shortfall against the omniscient policy that knows the true demand distribution
-(0% is perfect); every comparison is paired over the same 300 validation products and three seeds.
+Regret is the mean per-product percentage shortfall against the omniscient base-stock policy that knows the true
+demand distribution. It includes only products with positive reference profit (279 of the 300 validation products).
+The reference is not a pathwise clairvoyant upper bound. Comparisons use three training seeds and common evaluation
+products and demand paths within each comparison; not all historical comparator outputs are supplied.
 
 **Main design: the guarantee does real work, and its profit cost depends on the start.** Without the certificate,
 the same KAN orders more when stock rises in every training run, on 9 to 51% of products; MonoKAN never does. Started
-from the same initialisation, MonoKAN earned 14.11 less per period than that KAN when both started with a constant
-output (95% CI 5.90 to 22.32, p = 0.0008), about 0.3% of profit, and 548 more when both started with an open readout,
+from matched initialization schemes, MonoKAN earned 14.11 less per period than that KAN when both started with a constant
+output (95% CI for MonoKAN minus KAN: -22.32 to -5.90, p = 0.0008), about 0.3% of profit, and 548 more when both started with an open readout,
 from which the unconstrained KAN barely learned to react to stock. The first runs mixed the two starts (MonoKAN open,
-KAN constant) and showed a gap of 22.89. All direct-quantity networks lower their order by at most 0.54 units per unit
-of stock, against 0.90 for the optimal policy, and none beats a classical rule with the same 32-day window. Evaluation,
-unlike training, caps stock after ordering at four times the initial mean demand; without the cap the constant-start
+KAN constant) and showed a gap of 22.89. Average fitted stock-response magnitudes are at most 0.54, against 0.90
+for the reference policy on the same sweep; these averages are not pointwise derivative bounds. None beats a classical
+rule with the same 32-day window. Evaluation, unlike training, limits orders to `max(4*m0 - I, 0)`, where `m0` is the
+initial historical mean floored at one; it cannot remove inventory already above that level. Without the cap the constant-start
 gap is -15.29 and the open-start gap +749, so no conclusion depends on it.
 
 | Direct quantity | Start | Profit / period | Regret | Products ordering more as stock rises |
@@ -46,7 +54,7 @@ gap is -15.29 and the open-start gap +749, so no conclusion depends on it.
 | Paper FCNN | own | 3874.38 | 20.64% | 0% |
 | Classical rules, last 32 days | - | 4255.93 – 4275.37 | 1.25 – 1.90% | 0% |
 
-**Alternative design: the structure does the work, and no profit cost of the guarantee was detected.** The final policy reaches 0.80%
+**Alternative design: the decoder supplies inventory monotonicity, and no significant mean-profit difference from the matched KAN was detected.** The final policy reaches 0.80%
 regret (0.78% on 3,000 products) with 1,892 parameters. In every information window it beats the same KAN without the
 certificate on regret; against a good classical rule with the same information it is competitive, not better.
 
@@ -60,12 +68,13 @@ certificate on regret; against a good classical rule with the same information i
 
 **Matched comparison.** With 1,000 training products and both designs seeing only the last 32 days, the certified
 model earns 14.11 less per period in the main design (both networks from the constant start, p = 0.0008) and 5.90
-*more* in the alternative (p < 0.0001), and regret is 14.60% against 2.26%. This is consistent with a guarantee that
-costs more where it has to enforce the stock rule by itself, but the two designs differ in more than the constraint,
-so the comparison does not isolate the stock constraint.
+*more* in the alternative (p < 0.0001), and regret is 14.60% against 2.26%. This supports the combined policy design,
+not a causal claim about the number of constrained inputs: architecture, initialization, checkpoint frequency and
+the evaluation guard also differ across the two designs.
 
-`docs/EXPERIMENTS.md` has every number with its confidence interval, the controls, the negative results and the
-command that reproduces it.
+`docs/EXPERIMENTS.md` is the historical experiment index. The approved report and `report/RESULTS_PROVENANCE.md`
+take precedence for interpretation and evidence availability. No significant difference is not proof of equivalence;
+the 3,000-product evaluation contains the original validation set and is not an independent protected test.
 
 ## Repository
 
@@ -80,7 +89,7 @@ configs/                        final configs (see docs/ARCHITECTURE.md)
 scripts/                        command-line entry points
 tests/                          correctness tests
 docs/                           evidence index, code map, record of defects that affected results
-report/                         final report (PDF), the script that builds it, stored main-design runs (data/)
+report/                         approved PDF, matching LaTeX source (revised/), historical tooling and saved evidence
 ```
 
 ## Running
@@ -92,10 +101,29 @@ python -m pip install -e ".[dev]"     # or: python -m pip install -r requirement
 python -m pytest
 ```
 
+The previously observed environment is recorded in [`TESTED_ENVIRONMENT.md`](TESTED_ENVIRONMENT.md).
+It is not a complete dependency lockfile or a fresh-install guarantee.
+
+### Inspect saved results without training
+
+```bash
+python scripts/compare_target_stock_runs.py summary report/data/soft_quantile_monokan
+```
+
+Expected rounded final MonoKAN result: reward 4285.53 per period and regret 0.80%; seed regrets are
+0.88%, 0.68% and 0.84%. The archived CSVs are unchanged copies of the three submitted product-metric files.
+Main-design per-product rewards and paired summaries are in `report/data/direct_quantity/`.
+The checkpoints and training logs supplied in the submission ZIP are not tracked in Git.
+
+### Optional retraining (expensive)
+
+Use new output directories and do not overwrite saved evidence. Each target-stock command trains one seed;
+repeat for 2025, 2026 and 2027 in separate seed directories.
+
 Main design (each `train` call can run in its own process, e.g. one per model):
 
 ```bash
-python scripts/run_direct_quantity_comparison.py train --models monokan,kan,fcnn --seeds 2025,2026,2027 --epochs 2400 --out outputs/direct_quantity
+python scripts/run_direct_quantity_comparison.py train --models monokan,kan,kan_open,monokan_constant,fcnn --seeds 2025,2026,2027 --epochs 2400 --out outputs/direct_quantity
 python scripts/run_direct_quantity_comparison.py summarize outputs/direct_quantity
 python scripts/run_direct_quantity_comparison.py interpret outputs/direct_quantity
 ```
@@ -114,12 +142,20 @@ Classical rules in all three information windows:
 python scripts/run_classical_windows.py
 ```
 
-Rebuild the final report (figures, HTML and PDF; needs Chrome or Edge installed):
+### Compile the approved report
 
 ```bash
-python report/build_report.py
+cd report/revised
+pdflatex main.tex
+pdflatex main.tex
 ```
 
-The full list of commands, one per reported table, is at the end of `docs/EXPERIMENTS.md`. Everything runs on CPU;
+Alternatively upload `report/revised/` to Overleaf and select `main.tex`, or run `tectonic main.tex` there.
+Compilation produces `main.pdf`, not an automatic replacement of the approved `report/IDP_Final_Report.pdf`.
+**Do not run `report/build_report.py` to rebuild the approved report:** it uses the older HTML narrative and
+writes to that same approved-PDF path. It is retained only for provenance.
+
+The historical command index is at the end of `docs/EXPERIMENTS.md`; not every historical table can be recomputed
+from the supplied raw files. Everything runs on CPU;
 a 2,400-epoch target-stock run took between 5 and 55 minutes per seed on a desktop CPU, depending on the
 observation window.

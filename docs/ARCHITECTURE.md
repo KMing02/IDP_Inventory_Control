@@ -3,6 +3,10 @@
 The tree is organized around the final report. Experiment logic lives in `inventory_control/` so it stays importable
 and testable; `scripts/` holds thin command-line wrappers.
 
+The approved PDF is `report/IDP_Final_Report.pdf`, with matching standalone source in `report/revised/`.
+The old `report/build_report.py` and HTML template are historical, not the approved report's build path.
+See `report/RESULTS_PROVENANCE.md` for the difference between archived observations and historical summary-only values.
+
 ## Setting
 
 The synthetic lost-sales setting of Maggiar et al. (2025), "Structure-Informed Deep Reinforcement Learning for
@@ -33,8 +37,9 @@ demand CV nu            ~ Uniform(0, 1)
 ## Policies
 
 - `inventory_control.policies.neural.monokan`: Hermite-spline KAN and MonoKAN.
-  - `_project_edge_coefficients` projects every spline onto the Fritsch-Carlson monotone set after each optimizer
-    step; this is the certificate.
+  - `_project_edge_coefficients` projects spline coefficients onto sufficient Fritsch-Carlson conditions after each
+    optimizer step. Complete-model monotonicity also requires the signed network paths, extrapolation and decoder;
+    a spline check or an average curve alone is not a complete-model certificate.
   - `HermiteKANLayer.adapt_grid_to_samples` places knots at per-feature training quantiles.
   - `make_paper_raw_action_monokan_model_for_products` builds the main design: the order from 37 inputs (on-hand stock,
     32 demand lags, 4 economics), every direction certified. `monotone=False` gives the identical KAN without it.
@@ -67,7 +72,7 @@ demand CV nu            ~ Uniform(0, 1)
 | `run_soft_quantile_monokan.py` | alternative design, one seed; `--set` runs the controls |
 | `compare_target_stock_runs.py` | regret of saved runs and paired comparisons between them |
 | `run_classical_windows.py` | classical rules in every information window |
-| `run_direct_target_structural_audit.py` | certificate audit from checkpoints |
+| `run_direct_target_structural_audit.py` | empirical checkpoint diagnostics; generic soft-quantile scaling and spline-export limits are documented in report/RESULTS_PROVENANCE.md |
 | `run_monokan_interpretability.py` | partial dependence and newsvendor match |
 | `run_base_stock_output_experiment.py` | general target-stock runner (historical DeepGrid7 / FCNN rows) |
 | `run_paper_lost_sales_baselines.py` | the paper's fixed-history base-stock benchmarks |

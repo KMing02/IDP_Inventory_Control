@@ -1,5 +1,10 @@
 # Final Experiment Index
 
+This is a historical experiment index, not a complete raw-data archive. The approved submission report is
+`report/IDP_Final_Report.pdf`, with matching source in `report/revised/`. Its qualifications and
+`report/RESULTS_PROVENANCE.md` take precedence over older interpretations below. Not every recorded comparator,
+confidence interval or historical configuration can be independently reconstructed from the retained files.
+
 Evidence relevant to the final IDP report. All rows use three seeds (2025, 2026, 2027) on identical products and demand paths unless stated otherwise. Historical exploratory branches live in Git history, not in the current tree; the configs and modules of the superseded experiments were removed after commit `226f001` and can be restored from it (`git show 226f001:<path>`). The commands that reproduce each table are collected under Reproduction at the end.
 
 ## Metrics
@@ -82,8 +87,8 @@ constant-start gap `-15.29` (`[-24.21, -6.37]`), open-start gap `+749.44` (`[+53
 0.8 to 1.6 points for the three arms that trained well (KAN `14.13%`, MonoKAN constant `15.80%`, MonoKAN open
 `17.26%`) and to `118.81%` for the open-start KAN, whose excessive orders the cap cuts. No conclusion changes.
 
-No direct-quantity policy reacts to stock with more than 60% of the omniscient policy's
-`-0.90` on the same sweep, and none beats the classical rules that see the same 32-day window, the last 32
+Average fitted stock-response magnitudes are below 60% of the omniscient policy's
+`0.90` on the same sweep; these averages are not pointwise derivative bounds. None beats the classical rules that see the same 32-day window, the last 32
 observations re-estimated daily (`1.25%` Gamma fit, `1.90%` empirical quantile). The matched
 target-stock MonoKAN reaches `1.62%` regret at the same 1,000 products and 2,400 epochs: the decoder supplies the
 ordering strength, the certificate only the direction.
@@ -199,7 +204,8 @@ The learned policy is competitive with, but does not beat, a well-specified clas
 
 ## What Moved The Result
 
-Cumulative, three seeds each. Each step keeps the end-to-end monotonicity certificate.
+Cumulative, three seeds each; this is not an isolated one-factor ablation. Complete-model monotonicity depends
+on the network, projection, extrapolation and decoder together, not on these reward observations.
 
 | Step | Reward | Regret |
 |---|---:|---:|
@@ -233,21 +239,26 @@ Recorded so they are not retried.
 
 The final policy is certified nondecreasing in every observed demand and in selling price and lost-sales penalty, nonincreasing in purchase and holding cost, and nonincreasing in current inventory through `q_t = max(S_t - I_t, 0)`.
 
-Verified three ways:
+The historical numerical checks below support the implemented directions on sampled states; they are not proofs
+of a global guarantee. The generic soft-wrapper target diagnostic has a scaling limitation and its saved spline
+CSV is empty; see `report/RESULTS_PROVENANCE.md` before using these artifacts.
 
 - `scripts/run_direct_target_structural_audit.py` reports `0.0` violation rate in domain and under stress extrapolation, by finite differences and by autograd sign.
 - A float64 perturbation sweep over all 32 historical lags, future observed demands, and all four economics features returns a worst wrong-direction change of exactly `0.000e+00`, on the deployed running-mean and expanding-window targets rather than only the static one.
 - Scale equivariance in observed demand is exact to `0.00e+00`.
 
-The certificate now holds for the right reason. The projection previously admitted small violations; see `docs/DEBUGGING.md`.
+The structural argument requires the signed paths, constrained splines, extrapolation and decoder described in
+the approved report. The projection previously admitted small violations; see `docs/DEBUGGING.md`.
 
 ## Interpretability
 
-`scripts/run_monokan_interpretability.py` produces partial-dependence curves for every driver and checks each against its certified direction while plotting it. On the final checkpoint all five drivers report `direction_holds = True`, and the learned order-up-to level correlates `0.982` with the analytic newsvendor fractile `(p + k - c) / (p + k - c + h)` — which is never supplied to the model as a feature, an initialisation, or a training target.
+`scripts/run_monokan_interpretability.py` produces partial-dependence curves for every driver and checks each against its intended direction while plotting it. On the final checkpoint all five drivers report `direction_holds = True`, and the learned percentile `u` correlates `0.982` with the analytic newsvendor fractile `(p + k - c) / (p + k - c + h)`, which is never supplied to the final model as a feature, an initialisation, or a training target. This is agreement between percentile levels, not proof that the network independently discovered the supplied quantile/order-up-to structure.
 
 ## Sample Efficiency
 
-Three seeds per cell, MonoKAN against the parameter-matched MLP inside the identical decoder. Batch size is fixed at 100 for every training-set size, and every cell is trained to a fixed 2,400-epoch budget with best-checkpoint selection on a common validation set.
+Three seeds per cell, MonoKAN against the approximately parameter-matched MLP inside the identical decoder.
+The historical MLP control uses two hidden layers of 40 (`level_hidden_units: 40`), 1,884 total parameters versus
+MonoKAN's 1,892; changing only `level_network` at the default width is not this control. Batch size is fixed at 100 for every training-set size, and every cell is trained to a fixed 2,400-epoch budget with best-checkpoint selection on a common validation set.
 
 Both controls matter. Capping the batch at the training-set size makes small `n` silently mean full-batch gradients. Holding the *gradient-step* count constant instead of the epoch budget leaves the large-`n` cells undertrained, which reads as a spurious loss of sample efficiency: under that protocol `n = 1000` scored `4249.57` against `4285.30` when trained to convergence.
 
@@ -267,7 +278,7 @@ Regret:
 
 **The proposal's sample-efficiency claim is not supported, and the direction is reversed.** At 100 training products the monotone model is worse than the unconstrained MLP on both metrics. It needs more data, not less, and overtakes only at `n = 1000`.
 
-Across the three tested sizes MonoKAN improved monotonically on both metrics, while the MLP peaked around `n = 100` to `300` and then degraded; three sizes and three seeds do not establish this beyond the tested range. Selected checkpoints sit near the end of the budget for both, so this is not undertraining.
+Across the three tested sizes MonoKAN improved monotonically on both metrics, while the MLP peaked around `n = 100` to `300` and then degraded; three sizes and three seeds do not establish this beyond the tested range. Selected checkpoints sit near the end of the budget for both; that observation alone does not establish convergence or rule out undertraining.
 
 The two metrics disagree at `n = 300`, so any reported crossover point depends on which is quoted.
 
@@ -275,7 +286,8 @@ The two metrics disagree at `n = 300`, so any reported crossover point depends o
 
 Per-product reward has a standard deviation of `8,537` against a mean of `4,284`, so absolute means are far less precise than the seed spread suggests. Two different error bars must not be confused:
 
-- **seed SEM**: training variability on a fixed product set. This is what `+/-` denotes elsewhere in this file.
+- **seed SEM**: training variability on a fixed product set. Historical alternative-design rows use this convention;
+  the direct-quantity table explicitly uses seed SD. The final saved reward's SD is about 0.325 and SEM about 0.187.
 - **product SEM**: sampling variability of the product population. At 300 validation products the 95% CI on the population mean is roughly `+/- 966`.
 
 Paired comparisons largely remove this product-level noise, because every policy is evaluated on identical products and demand paths, so the product variance cancels (selection on the same validation products is a separate limitation): the paired SEM is `+/- 2.40` against differences of 1 to 10 reward per period.
@@ -312,6 +324,11 @@ The capacity, data-scale, and epoch ablations each ruled out one explanation for
 The raw-action FCNN anchor is not comparable to the target-stock rows: it uses a different product draw and validation size, so its higher reward reflects a different product population, not a better policy.
 
 ## Reproduction
+
+For a no-training check of the approved final result, run
+`python scripts/compare_target_stock_runs.py summary report/data/soft_quantile_monokan`.
+The remaining recipes describe historical or expensive reruns, not proof that every original artifact is supplied.
+Compile the approved report from `report/revised/main.tex`; the legacy HTML generator does not produce it.
 
 All commands run from the repository root; each target-stock command trains one seed (repeat for 2025, 2026, 2027).
 
