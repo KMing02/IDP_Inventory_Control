@@ -38,6 +38,30 @@ def load_paper_lost_sales_config(
     return config
 
 
+def apply_config_overrides(config: dict[str, Any], overrides: list[str]) -> dict[str, Any]:
+    """Return a copy of ``config`` with ``dotted.key=value`` overrides applied.
+
+    Values are parsed as YAML, so ``monokan.level_network=kan``, ``epochs=2400`` and ``monokan.roll_history=false``
+    give a string, an int and a bool. Every key must already exist, so a typo cannot silently add a new field.
+    """
+    updated = yaml.safe_load(yaml.safe_dump(config))
+    for override in overrides:
+        key, separator, raw_value = override.partition("=")
+        if not separator or not key:
+            raise ValueError(f"override must look like 'section.key=value', got {override!r}")
+        *parents, leaf = key.split(".")
+        node = updated
+        for part in parents:
+            if not isinstance(node.get(part), dict):
+                raise KeyError(f"unknown config section {key!r}")
+            node = node[part]
+        if leaf not in node:
+            raise KeyError(f"unknown config key {key!r}")
+        node[leaf] = yaml.safe_load(raw_value)
+    validate_paper_lost_sales_config(updated)
+    return updated
+
+
 def validate_paper_lost_sales_config(config: dict[str, Any]) -> None:
     """Raise ``ValueError`` when required paper-replication fields are missing."""
     missing = sorted(REQUIRED_PAPER_LOST_SALES_FIELDS - set(config))

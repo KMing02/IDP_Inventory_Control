@@ -1,4 +1,4 @@
-"""Train FCNN for Maggiar-style lost-sales replication."""
+"""Train the retained paper-style raw-action FCNN anchor."""
 
 from __future__ import annotations
 

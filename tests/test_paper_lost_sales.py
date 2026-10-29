@@ -9,9 +9,11 @@ from inventory_control.paper_lost_sales import (
     monotonicity_violation_rate,
     non_omniscient_gamma_base_stock_policy,
     omniscient_gamma_base_stock_policy,
+    paper_critical_quantile,
     paper_evaluation_demand_path,
     oracle_gamma_base_stock_policy,
     paper_lost_sales_step,
+    WindowedBaseStockPolicy,
 )
 from inventory_control.paper_evaluation import PAPER_TEST_EVALUATION_SEED_START, paper_test_product_count
 from inventory_control.products import PaperLostSalesProduct, PaperLostSalesProductGenerator
@@ -202,6 +204,25 @@ def test_exact_gamma_quantile_matches_known_exponential_quantile() -> None:
     assert gamma_quantile_exact(shape=1.0, scale=2.0, quantile=0.5) == pytest.approx(2.0 * np.log(2.0))
 
 
+def test_paper_critical_quantile_uses_underage_and_overage_costs() -> None:
+    product = PaperLostSalesProduct(
+        product_id="critical-fractile",
+        price=100,
+        purchase_cost=40,
+        holding_cost=5,
+        lost_sale_penalty=10,
+        true_mean_demand=10,
+        true_coefficient_of_variation=0.5,
+        gamma_shape=4,
+        gamma_scale=2.5,
+        demand_distribution_type="Gamma",
+        historical_demand=[10] * 32,
+        initial_inventory=0,
+    )
+
+    assert paper_critical_quantile(product) == pytest.approx(70 / 75)
+
+
 def test_paper_named_gamma_baselines_use_expected_information() -> None:
     product = PaperLostSalesProduct(
         product_id="p",
@@ -224,7 +245,7 @@ def test_paper_named_gamma_baselines_use_expected_information() -> None:
     assert omniscient.name == "OmniscientOptimal"
     assert non_omniscient.name == "NonOmniscientOptimal"
     assert omniscient.S == pytest.approx(
-        gamma_quantile_exact(product.gamma_shape, product.gamma_scale, 11 / 16)
+        gamma_quantile_exact(product.gamma_shape, product.gamma_scale, 11 / 12)
     )
 
 
@@ -377,3 +398,46 @@ def test_paper_evaluation_uses_stored_future_trace_when_available() -> None:
     )
 
     assert first["mean_total_reward"] == second["mean_total_reward"]
+
+
+def test_fixed_window_rules_reproduce_the_paper_benchmarks() -> None:
+    product = PaperLostSalesProductGenerator(_paper_table_config()).generate(1, "validation")[0]
+
+    percentile = WindowedBaseStockPolicy(product, estimator="percentile", window="fixed")
+    gamma = WindowedBaseStockPolicy(product, estimator="gamma", window="fixed")
+    percentile.observe_demand(10_000.0)
+
+    assert percentile.level == pytest.approx(historical_demand_base_stock_policy(product).S)
+    assert gamma.level == pytest.approx(non_omniscient_gamma_base_stock_policy(product).S)
+
+
+def test_rolling_window_forgets_and_expanding_window_remembers() -> None:
+    product = PaperLostSalesProductGenerator(_paper_table_config()).generate(1, "validation")[0]
+    history = [float(value) for value in product.historical_demand]
+    new_demand = [500.0, 0.0, 250.0]
+    rolling = WindowedBaseStockPolicy(product, window="rolling", length=4)
+    expanding = WindowedBaseStockPolicy(product, window="expanding")
+
+    for demand in new_demand:
+        rolling.observe_demand(demand)
+        expanding.observe_demand(demand)
+
+    quantile = paper_critical_quantile(product)
+    assert rolling.level == pytest.approx(np.quantile((history + new_demand)[-4:], quantile))
+    assert expanding.level == pytest.approx(np.quantile(history + new_demand, quantile))
+    assert rolling.act(inventory=rolling.level + 1.0, t=0) == 0.0
+
+
+def test_windowed_rule_restarts_from_the_initial_history_every_episode() -> None:
+    product = PaperLostSalesProductGenerator(_paper_table_config()).generate(1, "validation")[0]
+    policy = WindowedBaseStockPolicy(product, window="expanding")
+    start_level = policy.level
+
+    evaluate_paper_lost_sales_policy(product, policy, horizon=6, n_episodes=1, seed=3)
+    assert policy.level != pytest.approx(start_level)
+    policy.reset()
+
+    assert policy.level == pytest.approx(start_level)
+    with pytest.raises(ValueError, match="window"):
+        WindowedBaseStockPolicy(product, window="weekly")
+

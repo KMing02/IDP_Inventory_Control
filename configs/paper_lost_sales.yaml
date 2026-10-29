@@ -57,6 +57,7 @@ idp_benchmark:
   max_order_factor: 4.0
   scale_action_by_history_mean: true
   normalize_reward_loss: true
+  include_terminal_salvage: false
   monotonicity_samples_per_product: 2
   penalty_weights: [0.1, 1.0, 10.0]
   raw_violation_threshold: 0.01

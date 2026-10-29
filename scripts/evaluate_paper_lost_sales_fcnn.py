@@ -1,4 +1,4 @@
-"""Evaluate trained paper lost-sales FCNN."""
+"""Evaluate the retained paper-style raw-action FCNN anchor."""
 
 from __future__ import annotations
 
