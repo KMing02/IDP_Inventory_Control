@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Preserve the approved third-party class and archived evidence byte-for-byte.
+# Upstream IEEEtran contains intentional legacy whitespace; do not reformat it.
+report/revised/IEEEtran.cls -text whitespace=-blank-at-eol,-blank-at-eof
+report/data/soft_quantile_monokan/**/product_metrics.csv -text whitespace=cr-at-eol
